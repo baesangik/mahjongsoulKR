@@ -1,12 +1,3 @@
 {
- "deny": {},
- "revert": {
-  "$0qqs0@dc0a47113ic$8pa-tuguiiddfsziika": [
-   "add2desktop_android",
-   "add2desktop_ios"
-  ],
-  "uwv8ssud7f_6002_7c668nhc__anuddf9": [
-   "gai"
-  ]
- }
+ "deny": {}
 }

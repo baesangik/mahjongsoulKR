@@ -470,17 +470,16 @@ const MjsKr = (() => {
   };
 
   // Atlases are "<prefix>_<page>.png" textures plus a "<prefix>_config" TextAsset mapping sprite
-  // name -> page. When the KR atlas lacks sprites the JP one has, or has some in `keep` (sprite
-  // names to show as JP, e.g. English placeholders), the JP page textures holding them are appended
-  // to `swappedBytes` as new pages and the config points those sprites there.
+  // name -> page. When the KR atlas lacks sprites the JP one has, the JP page textures holding
+  // them are appended to `swappedBytes` as new pages and the config points those sprites there.
   // Returns { bytes, pages: [container keys added] }, or null when nothing is missing.
-  function mergeJpSprites(swappedBytes, jpBytes, keep = []) {
+  function mergeJpSprites(swappedBytes, jpBytes) {
     const b = readBundle(swappedBytes);
     const node = serializedNodes(b)[0], sf = readSerialized(node.data);
     const jsf = readSerialized(serializedNodes(readBundle(jpBytes))[0].data);
     const L = sf.little;
     const krSprites = new Set(sf.objects.filter(o => o.classId === 213).map(o => objectName(o, L)));
-    const missing = new Set(jsf.objects.filter(o => o.classId === 213).map(o => objectName(o, jsf.little)).filter(n => !krSprites.has(n) || keep.includes(n)));
+    const missing = new Set(jsf.objects.filter(o => o.classId === 213).map(o => objectName(o, jsf.little)).filter(n => !krSprites.has(n)));
     if (!missing.size) return null;
 
     const config = s => s.objects.find(o => o.classId === TEXT_ASSET && /_config$/.test(objectName(o, s.little)));
@@ -496,13 +495,6 @@ const MjsKr = (() => {
     const typeOf = cls => { const i = sf.types.findIndex(t => t.classId === cls); if (i < 0) throw new Error('no type ' + cls); return i; };
     const byPid = new Map(jsf.objects.map(o => [o.pid.join(','), o]));
     const taken = new Set(sf.objects.map(o => o.pid.join(',')));
-
-    // KR sprites being replaced get renamed so nothing finds them by name any more.
-    for (const o of sf.objects) {
-      const name = o.classId === 213 && objectName(o, L);
-      if (!name || !keep.includes(name)) continue;
-      o.data = concat([strBytes(name + '@kr', L), o.data.subarray(4 + ((enc.encode(name).length + 3) & ~3))]);
-    }
 
     let next = Math.max(...Object.values(krCfg)) + 1;
     const pages = [];

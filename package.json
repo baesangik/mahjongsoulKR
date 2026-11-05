@@ -1,12 +1,12 @@
 {
   "name": "mahjongsoulkr",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "일본 서버 작혼(웹) 한국어 텍스트·이미지 유저스크립트",
   "scripts": {
     "build": "node build.js",
     "swap": "node swap.js",
-    "deploy": "node swap.js && npm run audit && node swap.js && node build.js && npx wrangler deploy",
+    "deploy": "node swap.js && node build.js && npx wrangler deploy",
     "audit": ".venv/bin/python -I tools/audit.py"
   }
 }

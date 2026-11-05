@@ -3,8 +3,8 @@
 // which pairs stayed, changed, appeared, went away or newly failed validation, what the audit
 // flagged among the new ones, and where things moved. Moves are traced through the image archive
 // (tools/imgindex.py): a JP language bundle that vanished and one that appeared holding the same
-// pixels are the same asset under a new path, and an override or revert entry that no longer
-// matches anything is looked up the same way. Nothing is changed; the report only suggests.
+// pixels are the same asset under a new path, and a deny entry that no longer matches anything
+// is looked up the same way. Nothing is changed; the report only suggests.
 const fs = require('fs');
 const path = require('path');
 const MjsKr = require('../src/core.js');
@@ -150,7 +150,7 @@ function main() {
   const flagged = fresh.map(n => [n, verdicts[`${n} ${cur.pairs[n][0]}`]]).filter(([, v]) => !v || v.verdict === 'flag');
   say('', '## 감사 (이번에 새로 들어오거나 바뀐 짝)', '');
   if (!flagged.length) say('플래그 없음');
-  const decided = n => stem(n) in (overrides.deny || {}) || stem(n) in (overrides.revert || {});
+  const decided = n => stem(n) in (overrides.deny || {});
   for (const [n, v] of flagged) say(`- ${where(curJp, n)} \`${stem(n)}\`: ${v ? v.reasons.join(', ') : '감사 안 됨'}${decided(n) ? ' (overrides에서 처리함)' : ''}`);
   const open = flagged.filter(([n]) => !decided(n)).length;
   if (open) attention.push(`처리 안 된 플래그·미감사 ${open}개`);
@@ -198,9 +198,7 @@ function main() {
   const curByStem = curJp ? new Map([...curJp.owner.keys()].map(n => [stem(n), n])) : new Map();
   const oldBundle = s => { for (const m of allJpManifests()) for (const n of m ? m.owner.keys() : []) if (stem(n) === s && index('jp', n)) return n; return null; };
   let orphans = 0;
-  const keys = [...new Set([...Object.keys(overrides.deny || {}), ...Object.keys(overrides.revert || {})])];
-  for (const s of keys) {
-    const kind = s in (overrides.deny || {}) ? 'deny' : 'revert';
+  for (const s of Object.keys(overrides.deny || {})) {
     const nowName = curByStem.get(s);
     if (!nowName) {
       if (!curJp) continue;
@@ -217,20 +215,7 @@ function main() {
         }
         hint = best ? `옮겨 간 곳으로 보임: \`${stem(best.n)}\` ${where(curJp, best.n)}` : '닮은 번들 없음';
       }
-      say(`- ${kind} \`${s}\` 가 이번 빌드에 없음 → ${hint}`);
-      continue;
-    }
-    if (kind !== 'revert') continue;
-    // Sprite names to keep as JP must still exist; look a missing one up by its old pixels.
-    const ni = index('jp', nowName);
-    if (!ni) continue;
-    for (const sprite of overrides.revert[s]) {
-      if (ni.items[`sprite:${sprite}`]) continue;
-      orphans++;
-      const was = [...bySha()].flatMap(([, hs]) => hs).find(h => h.lang === 'jp' && h.key === `sprite:${sprite}` && stem(h.name) === s);
-      const old = was && index('jp', was.name).items[was.key];
-      const cand = old && Object.entries(ni.items).find(([, it]) => it.sha === old.sha || hamming(it.dhash, old.dhash) <= LOOK);
-      say(`- revert \`${s}\` 의 스프라이트 \`${sprite}\` 가 없음 → ${cand ? `이름이 \`${cand[0].replace(/^sprite:/, '')}\` 로 바뀐 것으로 보임` : '같은 이미지 없음'}`);
+      say(`- deny \`${s}\` 가 이번 빌드에 없음 → ${hint}`);
     }
   }
   if (!orphans) say('모두 이번 빌드에 맞음');

@@ -3,8 +3,8 @@
 // the way the userscript will, and keeps only pairs whose result matches the JP bundle's layout.
 // Each build pair (bundle_hash.txt) gets one snapshot in swapdb/builds; when it exists already, only
 // the filtering below reruns. public/swap.json is the snapshot minus pairs that
-// swapdb/verdicts.json (tools/audit.py) marks drop and pairs swapdb/overrides.json denies; pairs
-// with sprites listed under its `revert` are rebuilt to show those sprites as JP.
+// swapdb/verdicts.json (tools/audit.py, optional) marks drop and pairs swapdb/overrides.json denies.
+// Rule: a JP bundle shows either exactly as on the KR server or as the JP original, nothing between.
 const fs = require('fs');
 const path = require('path');
 const MjsKr = require('./src/core.js');
@@ -125,18 +125,17 @@ function assetPaths(m) {
   return own;
 }
 
-// The swap.json entry for one pair: [krName, size, pages?, keep?]. `keep` lists sprites to show as
-// JP anyway. Throws when the result can't stand in for the JP bundle.
-async function buildPair(jpName, krName, paths, keep = []) {
+// The swap.json entry for one pair: [krName, size, pages?]. Throws when the result can't stand in
+// for the JP bundle.
+async function buildPair(jpName, krName, paths) {
   const [jpBytes, krBytes] = await Promise.all([bundle('jp', jpName), bundle('kr', krName)]);
   const swapped = MjsKr.swapBundle(krBytes, krName, jpName);
-  const merged = MjsKr.mergeJpSprites(swapped, jpBytes, keep);
+  const merged = MjsKr.mergeJpSprites(swapped, jpBytes);
   const out = merged ? merged.bytes : swapped;
   const why = mismatch(jpBytes, out);
   if (why) throw new Error(why);
   if (!merged) return [krName, out.length];
-  const entry = [krName, out.length, merged.pages.map(k => manifestPath(paths, k))];
-  return keep.length ? [...entry, keep] : entry;
+  return [krName, out.length, merged.pages.map(k => manifestPath(paths, k))];
 }
 
 // Validates the candidate pairs of this build pair, reusing the results of `prev` (an earlier
@@ -187,33 +186,17 @@ async function main() {
   }
 
   const verdicts = readJson(path.join(DB, 'verdicts.json'), {});
-  const overrides = readJson(path.join(DB, 'overrides.json'), {});
-  const deny = overrides.deny || {}, revert = overrides.revert || {};
-  const pairs = {}, count = { swap: 0, drop: 0, flag: 0, unaudited: 0, denied: 0, reverted: 0 };
-  let paths = null, snapChanged = false;
-  snap.reverted = snap.reverted || {};
+  const deny = readJson(path.join(DB, 'overrides.json'), {}).deny || {};
+  const pairs = {}, count = { swap: 0, drop: 0, flag: 0, unaudited: 0, denied: 0 };
   for (const [jpName, v] of Object.entries(snap.pairs)) {
-    const stem = MjsKr.bundleStem(jpName);
-    if (stem in deny) { count.denied++; continue; }
+    if (MjsKr.bundleStem(jpName) in deny) { count.denied++; continue; }
     const verdict = (verdicts[`${jpName} ${v[0]}`] || { verdict: 'unaudited' }).verdict;
     count[verdict]++;
-    if (verdict === 'drop') continue;
-    const keep = [...(revert[stem] || [])].sort();
-    if (!keep.length) { pairs[jpName] = v; continue; }
-    // Reverting sprites rebuilds the pair; the result is kept in the snapshot per keep list.
-    let r = snap.reverted[jpName];
-    if (!r || r.keep.join() !== keep.join()) {
-      paths = paths || assetPaths(await jpManifest());
-      try { r = { keep, entry: await buildPair(jpName, v[0], paths.get(jpName), keep) }; } catch (e) { r = { keep, error: e.message }; }
-      snap.reverted[jpName] = r; snapChanged = true;
-    }
-    if (r.error) { console.log(`  revert ${stem}: ${r.error}, serving JP original`); count.denied++; continue; }
-    pairs[jpName] = r.entry; count.reverted++;
+    if (verdict !== 'drop') pairs[jpName] = v;
   }
-  if (snapChanged) fs.writeFileSync(path.join(buildsDir, snapName), JSON.stringify(snap, null, 1) + '\n');
   fs.writeFileSync(OUT, JSON.stringify({ jp: jpHash, kr: krHash, pairs }) + '\n');
   console.log(`wrote public/swap.json: ${Object.keys(pairs).length} pairs`, count);
-  if (count.unaudited) console.log('  run tools/audit.py for the unaudited pairs');
+  if (count.unaudited) console.log('  (optional) tools/audit.py drops pairs that change nothing on screen');
 }
 
 main().catch(e => { console.error(e); process.exit(1); });
