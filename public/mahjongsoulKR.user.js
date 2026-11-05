@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         mahjongsoulKR
 // @namespace    https://jakhon.chamchi.me
-// @version      0.2.2
+// @version      0.2.3
 // @description  일본 서버 작혼(웹)의 텍스트를 게임에 내장된 한국어로 표시합니다 (비공식)
 // @homepageURL  https://jakhon.chamchi.me
 // @supportURL   https://github.com/baesangik/mahjongsoulKR/issues
@@ -13,7 +13,7 @@
 // ==/UserScript==
 
 const MJS_KR_LUA = "-- [mjs-kr] injected at the end of GameMgr.lua by the userscript.\n-- Shows text in Korean on the JP client: client_language (region/server) stays jp,\n-- only prefer_language (display) becomes kr. Any failure falls back to Japanese.\ndo\n  local TAG = '[mjs-kr] '\n  local function log(m) pcall(print, TAG .. tostring(m)) end\n  local pk = table.unpack or unpack\n  local function pack(...) return { n = select('#', ...), ... } end\n\n  local KR = (ELangStr and ELangStr.Kr) or 'kr'\n  local JP = (ELangStr and ELangStr.Jp) or 'jp'\n  local font_ok = false\n\n  local function set_lang(l)\n    if GameMgr.Inst then GameMgr.Inst.prefer_language = l end\n    if LangMgr then\n      LangMgr.prefer_language = l\n      LangMgr.is_cn_lang = false\n      LangMgr.is_alphabet_lang = (l == KR)\n    end\n  end\n\n  local function apply()\n    if not (font_ok and GameMgr.Inst and LangMgr) then set_lang(JP); return end\n    if GameMgr.Inst.client_language ~= JP then\n      log('client_language=' .. tostring(GameMgr.Inst.client_language) .. ', not touching')\n      return\n    end\n    set_lang(KR)\n  end\n\n  local function wrap(tbl, name, fn)\n    local orig = tbl and tbl[name]\n    if type(orig) ~= 'function' then log('missing ' .. name); return end\n    tbl[name] = function(...) return fn(orig, ...) end\n  end\n\n  -- Load the Korean font group before GameMgr initialises (JP build never loads it).\n  local started = false\n  wrap(GameMgr, 'Init', function(orig, self, ...)\n    if started then return orig(self, ...) end\n    started = true\n    local args = pack(...)\n    local resumed = false\n    local function resume()\n      if resumed then return end\n      resumed = true\n      local ok, f = pcall(function() return LuaTools.LoadFont('kr/kr.ttf') end)\n      font_ok = ok and f ~= nil\n      log(font_ok and 'fonts/kr ready' or ('fonts/kr unavailable: ' .. tostring(f)))\n      return orig(self, pk(args, 1, args.n))\n    end\n    local ok, err = pcall(function() LuaTools.LoadGroup('fonts/kr', resume, nil) end)\n    if not ok then log('LoadGroup failed: ' .. tostring(err)); return resume() end\n  end)\n\n  wrap(LangMgr, 'Init', function(orig, ...)\n    local r = pack(orig(...))\n    local ok, err = pcall(apply)\n    if not ok then pcall(set_lang, JP); log('apply failed: ' .. tostring(err)) end\n    log('prefer_language=' .. tostring(GameMgr.Inst and GameMgr.Inst.prefer_language))\n    return pk(r, 1, r.n)\n  end)\n\n  -- GameMgr:OnInit copies GamePlatformInfo.prefer_language back; reapply before UI setup.\n  wrap(UIMgr, 'Init', function(orig, ...)\n    local ok, err = pcall(apply)\n    if not ok then pcall(set_lang, JP); log('apply failed: ' .. tostring(err)) end\n    return orig(...)\n  end)\n\n  log('hooks installed')\nend\n";
-const MJS_KR_VERSION = "0.2.2";
+const MJS_KR_VERSION = "0.2.3";
 // Core of the JP-server Korean patch: UnityFS bundle repacking + Lua injection.
 // Pure functions over Uint8Array so it runs both in the browser and in node.
 
@@ -75,6 +75,38 @@ const MjsKr = (() => {
     return out;
   }
 
+  // ---------- LZ4 block compression (greedy, deterministic: swap.js and the browser get the same bytes) ----------
+  const lz4Table = new Int32Array(1 << 16);
+  function lz4Compress(src) {
+    const n = src.length, out = new Uint8Array(n + ((n / 255) | 0) + 16);
+    const at = i => src[i] | (src[i + 1] << 8) | (src[i + 2] << 16) | (src[i + 3] << 24);
+    const len = (x, d) => { for (x -= 15; x >= 255; x -= 255) out[d++] = 255; out[d++] = x; return d; };
+    lz4Table.fill(-1);
+    let s = 0, anchor = 0, d = 0, misses = 0;
+    const limit = n - 12, end = n - 5; // format: last match starts 12+ bytes before the end, last 5 bytes are literals
+    while (s < limit) {
+      const seq = at(s), h = Math.imul(seq, 2654435761) >>> 16, ref = lz4Table[h];
+      lz4Table[h] = s;
+      if (ref < 0 || s - ref > 0xffff || at(ref) !== seq) { s += 1 + (misses++ >> 6); continue; }
+      misses = 0;
+      let ms = s, mr = ref, e = s + 4, r = ref + 4;
+      while (ms > anchor && mr > 0 && src[ms - 1] === src[mr - 1]) { ms--; mr--; }
+      while (e < end && src[e] === src[r]) { e++; r++; }
+      const lit = ms - anchor, m = e - ms - 4, tok = d++;
+      out[tok] = (Math.min(lit, 15) << 4) | Math.min(m, 15);
+      if (lit >= 15) d = len(lit, d);
+      out.set(src.subarray(anchor, ms), d); d += lit;
+      out[d++] = (ms - mr) & 255; out[d++] = (ms - mr) >> 8;
+      if (m >= 15) d = len(m, d);
+      anchor = s = e;
+    }
+    const lit = n - anchor;
+    out[d++] = Math.min(lit, 15) << 4;
+    if (lit >= 15) d = len(lit, d);
+    out.set(src.subarray(anchor), d); d += lit;
+    return out.subarray(0, d);
+  }
+
   function inflateBlock(data, usize, flags) {
     const c = flags & 0x3f;
     if (c === 0) return data;
@@ -112,20 +144,32 @@ const MjsKr = (() => {
     return { h, nodes };
   }
 
-  // Repack uncompressed; directory info right after the header.
-  function writeBundle({ h, nodes }) {
+  // Repack; directory info (uncompressed) right after the header. With `compress`, each 128 KiB
+  // block is LZ4 (as Unity writes them) when that is smaller: Unity keeps a loaded bundle's blocks
+  // as they came, so an uncompressed bundle costs its full size in the game's memory.
+  function writeBundle({ h, nodes }, compress = false) {
     const CHUNK = 0x20000;
     let off = 0;
     for (const n of nodes) { n.offset = off; n.size = n.data.length; off += n.size; }
     const total = off;
     const blocks = [];
-    for (let p = 0; p < total; p += CHUNK) blocks.push(Math.min(CHUNK, total - p));
-    if (!blocks.length) blocks.push(0);
+    if (compress) {
+      const stream = new Writer();
+      for (const n of nodes) stream.push(n.data);
+      const all = stream.out();
+      for (let p = 0; p < total; p += CHUNK) {
+        const raw = all.subarray(p, Math.min(p + CHUNK, total)), c = lz4Compress(raw);
+        blocks.push(c.length < raw.length ? { u: raw.length, data: c.slice(), f: 2 } : { u: raw.length, data: raw, f: 0 });
+      }
+    } else {
+      for (let p = 0; p < total; p += CHUNK) blocks.push({ u: Math.min(CHUNK, total - p) });
+    }
+    if (!blocks.length) blocks.push({ u: 0 });
 
     const iw = new Writer();
     iw.push(h.hash);
     iw.i32(blocks.length);
-    for (const b of blocks) { iw.u32(b); iw.u32(b); iw.u16(0); }
+    for (const b of blocks) { iw.u32(b.u); iw.u32(b.data ? b.data.length : b.u); iw.u16(b.f || 0); }
     iw.i32(nodes.length);
     for (const n of nodes) { iw.i64(n.offset); iw.i64(n.size); iw.u32(n.flags); iw.cstr(n.path); }
     const info = iw.out();
@@ -138,7 +182,8 @@ const MjsKr = (() => {
     if (h.version >= 7) head.align(16);
     head.push(info);
     if (flags & 0x200) head.align(16);
-    for (const n of nodes) head.push(n.data);
+    if (compress) for (const b of blocks) { if (b.data) head.push(b.data); }
+    else for (const n of nodes) head.push(n.data);
     const out = head.out();
     new DataView(out.buffer).setBigInt64(sizePos, BigInt(out.length));
     return out;
@@ -434,8 +479,8 @@ const MjsKr = (() => {
     }
   }
 
-  // krBytes: KR build bundle `krName`; returns it renamed to pass as JP bundle `jpName` (uncompressed).
-  function swapBundle(krBytes, krName, jpName) {
+  // krBytes: KR build bundle `krName`; returns it renamed to pass as JP bundle `jpName`.
+  function swapBundle(krBytes, krName, jpName, compress = false) {
     const krStem = bundleStem(krName), jpStem = bundleStem(jpName);
     if (krStem.length !== jpStem.length) throw new Error('bundle names differ in length');
     const from = enc.encode(krStem), to = enc.encode(jpStem);
@@ -453,7 +498,7 @@ const MjsKr = (() => {
         swapLangTokens(region);
       }
     }
-    return writeBundle(b);
+    return writeBundle(b, compress);
   }
 
   // ---------- AssetBundle object (class 142): name, preload table, container; the rest kept as is ----------
@@ -489,7 +534,7 @@ const MjsKr = (() => {
   // name -> page. When the KR atlas lacks sprites the JP one has, the JP page textures holding
   // them are appended to `swappedBytes` as new pages and the config points those sprites there.
   // Returns { bytes, pages: [container keys added] }, or null when nothing is missing.
-  function mergeJpSprites(swappedBytes, jpBytes) {
+  function mergeJpSprites(swappedBytes, jpBytes, compress = false) {
     const b = readBundle(swappedBytes);
     const node = serializedNodes(b)[0], sf = readSerialized(node.data);
     const jsf = readSerialized(serializedNodes(readBundle(jpBytes))[0].data);
@@ -543,7 +588,7 @@ const MjsKr = (() => {
     krCfgText.script = enc.encode(JSON.stringify(krCfg));
     writeTextAsset(krCfgObj, L, krCfgText);
     node.data = writeSerializedTable(sf);
-    return { bytes: writeBundle(b), pages };
+    return { bytes: writeBundle(b, compress), pages };
   }
 
   // For offline checks: [{ classId, data }] of every object in a bundle.
@@ -558,7 +603,7 @@ const MjsKr = (() => {
 
   // Patches the Lua TextAsset whose name matches `scriptName` (e.g. "GameMgr.lua"):
   // inserts `luaChunk` right before the module's final `return <Module>`.
-  function patchLuaBundle(bundleBytes, scriptName, luaChunk, log = () => {}) {
+  function patchLuaBundle(bundleBytes, scriptName, luaChunk, log = () => {}, compress = false) {
     const b = readBundle(bundleBytes);
     const modName = scriptName.replace(/\.lua$/i, '').split(/[./]/).pop();
     const tail = new RegExp(`return\\s+${modName}\\s*$`);
@@ -578,7 +623,7 @@ const MjsKr = (() => {
         writeTextAsset(o, sf.little, t);
         node.data = writeSerialized(sf);
         log(`patched ${t.name} (key len ${key.length}, +${patched.length - src.length} chars)`);
-        return writeBundle(b);
+        return writeBundle(b, compress);
       }
     }
     return null;
@@ -598,7 +643,10 @@ const MjsKr = (() => {
     return null;
   }
 
-  return { locate, readManifest, setManifestSizes, patchLuaBundle, extractLua, xor, findKey, readBundle, bundleStem, swapBundle, mergeJpSprites, listObjects, readAssetBundle };
+  // Same bundle, blocks LZ4-compressed (see writeBundle).
+  const compressBundle = bytes => writeBundle(readBundle(bytes), true);
+
+  return { compressBundle, locate, readManifest, setManifestSizes, patchLuaBundle, extractLua, xor, findKey, readBundle, bundleStem, swapBundle, mergeJpSprites, listObjects, readAssetBundle };
 })();
 
 
@@ -634,7 +682,7 @@ const MjsKr = (() => {
     if (!name) throw new Error('GameMgr.lua not found in manifest');
     const br = await realFetch(new URL(name, base).href, { cache: 'no-store' });
     if (!br.ok) throw new Error('bundle fetch ' + br.status);
-    const patched = MjsKr.patchLuaBundle(new Uint8Array(await br.arrayBuffer()), TARGET_SCRIPT, MJS_KR_LUA, m => console.log(TAG, m));
+    const patched = MjsKr.patchLuaBundle(new Uint8Array(await br.arrayBuffer()), TARGET_SCRIPT, MJS_KR_LUA, m => console.log(TAG, m), true);
     if (!patched) throw new Error('GameMgr.lua not found in ' + name);
     return { name, bytes: patched };
   }
@@ -650,7 +698,8 @@ const MjsKr = (() => {
     if (data.min && newer(data.min, MJS_KR_VERSION)) throw new Error(`swap.json wants script ${data.min}+, this is ${MJS_KR_VERSION}: update the userscript`);
     const { pairs } = data;
     const krBase = new URL(base.href.replace('/v4/jp/', '/v4/kr/'));
-    return new Map(Object.entries(pairs).map(([jp, [kr, size, pages]]) => [jp, { kr: new URL(kr, krBase).href, krName: kr, size, pages: pages || [] }]));
+    // lz4Size: serve the bundle LZ4-compressed, so the game holds about a quarter of the bytes.
+    return new Map(Object.entries(pairs).map(([jp, [kr, size, pages, lz4Size]]) => [jp, { kr: new URL(kr, krBase).href, krName: kr, size: lz4Size || size, lz4: !!lz4Size, pages: pages || [] }]));
   }
 
   async function onManifest(input, init) {
@@ -689,8 +738,8 @@ const MjsKr = (() => {
       const [r, jr] = await Promise.all([realFetch(s.kr, { cache: 'no-store' }), s.pages.length ? realFetch(input, init) : null]);
       if (!r.ok) throw new Error('kr fetch ' + r.status);
       if (jr && !jr.ok) throw new Error('jp fetch ' + jr.status);
-      let bytes = MjsKr.swapBundle(new Uint8Array(await r.arrayBuffer()), s.krName, name);
-      if (jr) bytes = MjsKr.mergeJpSprites(bytes, new Uint8Array(await jr.arrayBuffer())).bytes;
+      let bytes = MjsKr.swapBundle(new Uint8Array(await r.arrayBuffer()), s.krName, name, s.lz4 && !jr);
+      if (jr) bytes = MjsKr.mergeJpSprites(bytes, new Uint8Array(await jr.arrayBuffer()), s.lz4).bytes;
       if (bytes.length !== s.size) throw new Error(`size ${bytes.length} != ${s.size}`);
       console.log(TAG, 'swapped', name);
       return bundleResponse(bytes);

@@ -20,7 +20,7 @@ const readJson = (p, dflt) => fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, '
 const CONCURRENCY = 8;
 // swap.json format. Bump SWAP_FORMAT when entries change shape, and MIN_SCRIPT to the first
 // userscript version that reads the new shape; older scripts (0.2.2+) then skip image swaps.
-const SWAP_FORMAT = 1; // pairs: { jpName: [krName, size, pages?] }
+const SWAP_FORMAT = 1; // pairs: { jpName: [krName, size, pages|null, lz4Size] } (lz4Size: 0.2.3+, older scripts ignore it)
 const MIN_SCRIPT = '0.2.0';
 
 const JP_TOKEN = /(?<![A-Za-z0-9])(jp|JP|Jp)(?![A-Za-z0-9])/g;
@@ -135,8 +135,9 @@ function assetPaths(m) {
   return own;
 }
 
-// The swap.json entry for one pair: [krName, size, pages?]. Throws when the result can't stand in
-// for the JP bundle.
+// The swap.json entry for one pair: [krName, size, pages|null, lz4Size]. size is the uncompressed
+// result (scripts before 0.2.3 serve that), lz4Size the same bundle LZ4-compressed. Throws when the
+// result can't stand in for the JP bundle.
 async function buildPair(jpName, krName, paths) {
   const [jpBytes, krBytes] = await Promise.all([bundle('jp', jpName), bundle('kr', krName)]);
   const swapped = MjsKr.swapBundle(krBytes, krName, jpName);
@@ -144,8 +145,7 @@ async function buildPair(jpName, krName, paths) {
   const out = merged ? merged.bytes : swapped;
   const why = mismatch(jpBytes, out);
   if (why) throw new Error(why);
-  if (!merged) return [krName, out.length];
-  return [krName, out.length, merged.pages.map(k => manifestPath(paths, k))];
+  return [krName, out.length, merged ? merged.pages.map(k => manifestPath(paths, k)) : null, MjsKr.compressBundle(out).length];
 }
 
 // Validates the candidate pairs of this build pair, reusing the results of `prev` (an earlier
@@ -162,7 +162,7 @@ async function validate(prev, jpHash, krHash) {
     while (next < pairs.length) {
       const [jpName, krName] = pairs[next++];
       const old = prev.pairs[jpName];
-      if (old && old[0] === krName) { result[jpName] = old; continue; }
+      if (old && old[0] === krName && old[3]) { result[jpName] = old; continue; }
       if (prev.rejected[jpName] && prev.rejected[jpName][0] === krName) { rejected[jpName] = prev.rejected[jpName]; continue; }
       try {
         result[jpName] = await buildPair(jpName, krName, jpOwn.get(jpName));
@@ -185,9 +185,10 @@ async function main() {
   const names = fs.readdirSync(buildsDir).filter(f => f.endsWith('.json')).sort();
   let snapName = names.find(f => f.endsWith(tag));
   let snap = snapName && readJson(path.join(buildsDir, snapName));
-  if (!snap || force) {
-    const last = names.length ? readJson(path.join(buildsDir, names[names.length - 1])) : { pairs: {}, rejected: {} };
-    snap = { jp: jpHash, kr: krHash, date: new Date().toISOString().slice(0, 10), ...(await validate(force ? { pairs: {}, rejected: {} } : last, jpHash, krHash)) };
+  const sizeless = snap && Object.values(snap.pairs).some(v => !v[3]); // snapshot from before lz4Size
+  if (!snap || force || sizeless) {
+    const last = sizeless ? snap : names.length ? readJson(path.join(buildsDir, names[names.length - 1])) : { pairs: {}, rejected: {} };
+    snap = { jp: jpHash, kr: krHash, date: sizeless ? snap.date : new Date().toISOString().slice(0, 10), ...(await validate(force ? { pairs: {}, rejected: {} } : last, jpHash, krHash)) };
     snapName = snapName || snap.date + tag;
     fs.writeFileSync(path.join(buildsDir, snapName), JSON.stringify(snap, null, 1) + '\n');
     console.log(`wrote swapdb/builds/${snapName}: ${Object.keys(snap.pairs).length} pairs, ${Object.keys(snap.rejected).length} rejected`);

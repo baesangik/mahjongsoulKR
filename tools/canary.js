@@ -51,7 +51,7 @@ function check(manifestBytes, bundle, injectLua) {
     if (mod === 'GameMgr') {
       // Exactly what the userscript does to this bundle.
       try {
-        const patched = MjsKr.patchLuaBundle(bytes, 'GameMgr.lua', injectLua);
+        const patched = MjsKr.patchLuaBundle(bytes, 'GameMgr.lua', injectLua, undefined, true);
         const back = patched && decrypt(MjsKr.extractLua(patched, 'GameMgr.lua'), mod);
         if (!back || !back.includes(injectLua.trim().split('\n')[0])) problems.push('GameMgr.lua: patch did not round-trip');
       } catch (e) {

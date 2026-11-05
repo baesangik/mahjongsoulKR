@@ -59,6 +59,38 @@ const MjsKr = (() => {
     return out;
   }
 
+  // ---------- LZ4 block compression (greedy, deterministic: swap.js and the browser get the same bytes) ----------
+  const lz4Table = new Int32Array(1 << 16);
+  function lz4Compress(src) {
+    const n = src.length, out = new Uint8Array(n + ((n / 255) | 0) + 16);
+    const at = i => src[i] | (src[i + 1] << 8) | (src[i + 2] << 16) | (src[i + 3] << 24);
+    const len = (x, d) => { for (x -= 15; x >= 255; x -= 255) out[d++] = 255; out[d++] = x; return d; };
+    lz4Table.fill(-1);
+    let s = 0, anchor = 0, d = 0, misses = 0;
+    const limit = n - 12, end = n - 5; // format: last match starts 12+ bytes before the end, last 5 bytes are literals
+    while (s < limit) {
+      const seq = at(s), h = Math.imul(seq, 2654435761) >>> 16, ref = lz4Table[h];
+      lz4Table[h] = s;
+      if (ref < 0 || s - ref > 0xffff || at(ref) !== seq) { s += 1 + (misses++ >> 6); continue; }
+      misses = 0;
+      let ms = s, mr = ref, e = s + 4, r = ref + 4;
+      while (ms > anchor && mr > 0 && src[ms - 1] === src[mr - 1]) { ms--; mr--; }
+      while (e < end && src[e] === src[r]) { e++; r++; }
+      const lit = ms - anchor, m = e - ms - 4, tok = d++;
+      out[tok] = (Math.min(lit, 15) << 4) | Math.min(m, 15);
+      if (lit >= 15) d = len(lit, d);
+      out.set(src.subarray(anchor, ms), d); d += lit;
+      out[d++] = (ms - mr) & 255; out[d++] = (ms - mr) >> 8;
+      if (m >= 15) d = len(m, d);
+      anchor = s = e;
+    }
+    const lit = n - anchor;
+    out[d++] = Math.min(lit, 15) << 4;
+    if (lit >= 15) d = len(lit, d);
+    out.set(src.subarray(anchor), d); d += lit;
+    return out.subarray(0, d);
+  }
+
   function inflateBlock(data, usize, flags) {
     const c = flags & 0x3f;
     if (c === 0) return data;
@@ -96,20 +128,32 @@ const MjsKr = (() => {
     return { h, nodes };
   }
 
-  // Repack uncompressed; directory info right after the header.
-  function writeBundle({ h, nodes }) {
+  // Repack; directory info (uncompressed) right after the header. With `compress`, each 128 KiB
+  // block is LZ4 (as Unity writes them) when that is smaller: Unity keeps a loaded bundle's blocks
+  // as they came, so an uncompressed bundle costs its full size in the game's memory.
+  function writeBundle({ h, nodes }, compress = false) {
     const CHUNK = 0x20000;
     let off = 0;
     for (const n of nodes) { n.offset = off; n.size = n.data.length; off += n.size; }
     const total = off;
     const blocks = [];
-    for (let p = 0; p < total; p += CHUNK) blocks.push(Math.min(CHUNK, total - p));
-    if (!blocks.length) blocks.push(0);
+    if (compress) {
+      const stream = new Writer();
+      for (const n of nodes) stream.push(n.data);
+      const all = stream.out();
+      for (let p = 0; p < total; p += CHUNK) {
+        const raw = all.subarray(p, Math.min(p + CHUNK, total)), c = lz4Compress(raw);
+        blocks.push(c.length < raw.length ? { u: raw.length, data: c.slice(), f: 2 } : { u: raw.length, data: raw, f: 0 });
+      }
+    } else {
+      for (let p = 0; p < total; p += CHUNK) blocks.push({ u: Math.min(CHUNK, total - p) });
+    }
+    if (!blocks.length) blocks.push({ u: 0 });
 
     const iw = new Writer();
     iw.push(h.hash);
     iw.i32(blocks.length);
-    for (const b of blocks) { iw.u32(b); iw.u32(b); iw.u16(0); }
+    for (const b of blocks) { iw.u32(b.u); iw.u32(b.data ? b.data.length : b.u); iw.u16(b.f || 0); }
     iw.i32(nodes.length);
     for (const n of nodes) { iw.i64(n.offset); iw.i64(n.size); iw.u32(n.flags); iw.cstr(n.path); }
     const info = iw.out();
@@ -122,7 +166,8 @@ const MjsKr = (() => {
     if (h.version >= 7) head.align(16);
     head.push(info);
     if (flags & 0x200) head.align(16);
-    for (const n of nodes) head.push(n.data);
+    if (compress) for (const b of blocks) { if (b.data) head.push(b.data); }
+    else for (const n of nodes) head.push(n.data);
     const out = head.out();
     new DataView(out.buffer).setBigInt64(sizePos, BigInt(out.length));
     return out;
@@ -418,8 +463,8 @@ const MjsKr = (() => {
     }
   }
 
-  // krBytes: KR build bundle `krName`; returns it renamed to pass as JP bundle `jpName` (uncompressed).
-  function swapBundle(krBytes, krName, jpName) {
+  // krBytes: KR build bundle `krName`; returns it renamed to pass as JP bundle `jpName`.
+  function swapBundle(krBytes, krName, jpName, compress = false) {
     const krStem = bundleStem(krName), jpStem = bundleStem(jpName);
     if (krStem.length !== jpStem.length) throw new Error('bundle names differ in length');
     const from = enc.encode(krStem), to = enc.encode(jpStem);
@@ -437,7 +482,7 @@ const MjsKr = (() => {
         swapLangTokens(region);
       }
     }
-    return writeBundle(b);
+    return writeBundle(b, compress);
   }
 
   // ---------- AssetBundle object (class 142): name, preload table, container; the rest kept as is ----------
@@ -473,7 +518,7 @@ const MjsKr = (() => {
   // name -> page. When the KR atlas lacks sprites the JP one has, the JP page textures holding
   // them are appended to `swappedBytes` as new pages and the config points those sprites there.
   // Returns { bytes, pages: [container keys added] }, or null when nothing is missing.
-  function mergeJpSprites(swappedBytes, jpBytes) {
+  function mergeJpSprites(swappedBytes, jpBytes, compress = false) {
     const b = readBundle(swappedBytes);
     const node = serializedNodes(b)[0], sf = readSerialized(node.data);
     const jsf = readSerialized(serializedNodes(readBundle(jpBytes))[0].data);
@@ -527,7 +572,7 @@ const MjsKr = (() => {
     krCfgText.script = enc.encode(JSON.stringify(krCfg));
     writeTextAsset(krCfgObj, L, krCfgText);
     node.data = writeSerializedTable(sf);
-    return { bytes: writeBundle(b), pages };
+    return { bytes: writeBundle(b, compress), pages };
   }
 
   // For offline checks: [{ classId, data }] of every object in a bundle.
@@ -542,7 +587,7 @@ const MjsKr = (() => {
 
   // Patches the Lua TextAsset whose name matches `scriptName` (e.g. "GameMgr.lua"):
   // inserts `luaChunk` right before the module's final `return <Module>`.
-  function patchLuaBundle(bundleBytes, scriptName, luaChunk, log = () => {}) {
+  function patchLuaBundle(bundleBytes, scriptName, luaChunk, log = () => {}, compress = false) {
     const b = readBundle(bundleBytes);
     const modName = scriptName.replace(/\.lua$/i, '').split(/[./]/).pop();
     const tail = new RegExp(`return\\s+${modName}\\s*$`);
@@ -562,7 +607,7 @@ const MjsKr = (() => {
         writeTextAsset(o, sf.little, t);
         node.data = writeSerialized(sf);
         log(`patched ${t.name} (key len ${key.length}, +${patched.length - src.length} chars)`);
-        return writeBundle(b);
+        return writeBundle(b, compress);
       }
     }
     return null;
@@ -582,7 +627,10 @@ const MjsKr = (() => {
     return null;
   }
 
-  return { locate, readManifest, setManifestSizes, patchLuaBundle, extractLua, xor, findKey, readBundle, bundleStem, swapBundle, mergeJpSprites, listObjects, readAssetBundle };
+  // Same bundle, blocks LZ4-compressed (see writeBundle).
+  const compressBundle = bytes => writeBundle(readBundle(bytes), true);
+
+  return { compressBundle, locate, readManifest, setManifestSizes, patchLuaBundle, extractLua, xor, findKey, readBundle, bundleStem, swapBundle, mergeJpSprites, listObjects, readAssetBundle };
 })();
 
 if (typeof module !== 'undefined') module.exports = MjsKr;

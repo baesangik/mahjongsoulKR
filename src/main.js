@@ -30,7 +30,7 @@
     if (!name) throw new Error('GameMgr.lua not found in manifest');
     const br = await realFetch(new URL(name, base).href, { cache: 'no-store' });
     if (!br.ok) throw new Error('bundle fetch ' + br.status);
-    const patched = MjsKr.patchLuaBundle(new Uint8Array(await br.arrayBuffer()), TARGET_SCRIPT, MJS_KR_LUA, m => console.log(TAG, m));
+    const patched = MjsKr.patchLuaBundle(new Uint8Array(await br.arrayBuffer()), TARGET_SCRIPT, MJS_KR_LUA, m => console.log(TAG, m), true);
     if (!patched) throw new Error('GameMgr.lua not found in ' + name);
     return { name, bytes: patched };
   }
@@ -46,7 +46,8 @@
     if (data.min && newer(data.min, MJS_KR_VERSION)) throw new Error(`swap.json wants script ${data.min}+, this is ${MJS_KR_VERSION}: update the userscript`);
     const { pairs } = data;
     const krBase = new URL(base.href.replace('/v4/jp/', '/v4/kr/'));
-    return new Map(Object.entries(pairs).map(([jp, [kr, size, pages]]) => [jp, { kr: new URL(kr, krBase).href, krName: kr, size, pages: pages || [] }]));
+    // lz4Size: serve the bundle LZ4-compressed, so the game holds about a quarter of the bytes.
+    return new Map(Object.entries(pairs).map(([jp, [kr, size, pages, lz4Size]]) => [jp, { kr: new URL(kr, krBase).href, krName: kr, size: lz4Size || size, lz4: !!lz4Size, pages: pages || [] }]));
   }
 
   async function onManifest(input, init) {
@@ -85,8 +86,8 @@
       const [r, jr] = await Promise.all([realFetch(s.kr, { cache: 'no-store' }), s.pages.length ? realFetch(input, init) : null]);
       if (!r.ok) throw new Error('kr fetch ' + r.status);
       if (jr && !jr.ok) throw new Error('jp fetch ' + jr.status);
-      let bytes = MjsKr.swapBundle(new Uint8Array(await r.arrayBuffer()), s.krName, name);
-      if (jr) bytes = MjsKr.mergeJpSprites(bytes, new Uint8Array(await jr.arrayBuffer())).bytes;
+      let bytes = MjsKr.swapBundle(new Uint8Array(await r.arrayBuffer()), s.krName, name, s.lz4 && !jr);
+      if (jr) bytes = MjsKr.mergeJpSprites(bytes, new Uint8Array(await jr.arrayBuffer()), s.lz4).bytes;
       if (bytes.length !== s.size) throw new Error(`size ${bytes.length} != ${s.size}`);
       console.log(TAG, 'swapped', name);
       return bundleResponse(bytes);
