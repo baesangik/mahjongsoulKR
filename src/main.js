@@ -41,7 +41,7 @@
     if (!r.ok) throw new Error('swap.json ' + r.status);
     const { pairs } = await r.json();
     const krBase = new URL(base.href.replace('/v4/jp/', '/v4/kr/'));
-    return new Map(Object.entries(pairs).map(([jp, [kr, size, pages]]) => [jp, { kr: new URL(kr, krBase).href, krName: kr, size, pages: pages || [] }]));
+    return new Map(Object.entries(pairs).map(([jp, [kr, size, pages, keep]]) => [jp, { kr: new URL(kr, krBase).href, krName: kr, size, pages: pages || [], keep: keep || [] }]));
   }
 
   async function onManifest(input, init) {
@@ -71,14 +71,14 @@
   }
 
   // The manifest already promised `size` bytes; anything else falls back to the JP original.
-  // Entries with pages also need the JP original, for sprites only it has.
+  // Entries with pages also need the JP original, for sprites only it has (or that `keep` shows as JP).
   async function serveSwap(name, s, input, init) {
     try {
       const [r, jr] = await Promise.all([realFetch(s.kr, { cache: 'no-store' }), s.pages.length ? realFetch(input, init) : null]);
       if (!r.ok) throw new Error('kr fetch ' + r.status);
       if (jr && !jr.ok) throw new Error('jp fetch ' + jr.status);
       let bytes = MjsKr.swapBundle(new Uint8Array(await r.arrayBuffer()), s.krName, name);
-      if (jr) bytes = MjsKr.mergeJpSprites(bytes, new Uint8Array(await jr.arrayBuffer())).bytes;
+      if (jr) bytes = MjsKr.mergeJpSprites(bytes, new Uint8Array(await jr.arrayBuffer()), s.keep).bytes;
       if (bytes.length !== s.size) throw new Error(`size ${bytes.length} != ${s.size}`);
       console.log(TAG, 'swapped', name);
       return bundleResponse(bytes);

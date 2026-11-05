@@ -33,7 +33,28 @@
 - jp·kr 빌드는 같은 프로젝트에서 나와 번들 대부분이 같다. 번들 이름은 경로를 난독화한 것이라 `.../jp/...` 번들과 `.../kr/...` 번들이 짝지어진다.
 - `swap.js`가 두 매니페스트에서 짝을 찾는다. 그다음 kr 번들의 번들 이름과 `kr` 토큰(`/kr/`, `_kr_` 등)을 `jp`로 바꾼다. 바꾼 결과가 jp 번들과 오브젝트 구성·이름이 같은 짝만 `public/swap.json`에 남긴다. 각 짝에는 kr 번들 이름과 바꾼 뒤의 크기가 들어간다. 바꾸는 문자열은 길이가 같아서 오프셋이 안 움직인다.
 - 유저스크립트는 `swap.json`을 받아 매니페스트의 크기를 고치고, 게임이 그 jp 번들을 요청하면 kr 번들을 받아 같은 방식으로 바꿔서 준다. 실패하면 jp 원본을 준다.
-- `swap.json`의 키는 해시가 붙은 전체 번들 이름이다. 게임이 업데이트되면 낡은 항목은 아무것에도 안 걸린다. `swap.js`는 `bundle_hash.txt`가 바뀌었을 때만 다시 돈다.
+- `swap.json`의 키는 해시가 붙은 전체 번들 이름이다. 게임이 업데이트되면 낡은 항목은 아무것에도 안 걸린다. `swap.js`는 `bundle_hash.txt`가 바뀌었을 때만 짝을 다시 검증한다.
+
+### 스왑 원장 (`swapdb/`, 커밋한다)
+
+- `builds/<날짜>_<jp해시8>_<kr해시8>.json`: 빌드 쌍마다 하나. 검증을 통과한 짝(`pairs`)과 떨어진 짝·이유(`rejected`). 빌드별 짝 기록이 여기 남는다.
+- `verdicts.json`: `"<jp번들> <kr번들>"`별 감사 결과(픽셀 → OCR). `tools/audit.py`가 쓴다. 번들 이름에 내용 해시가 있어서 한 번 판정한 짝은 판정 방식(`METHOD`)이 바뀌기 전까지 다시 보지 않는다.
+  - `drop`: 픽셀이 같거나 JP가 찾는 이름의 이미지가 KR에 없다. 바꿔도 화면이 안 바뀌므로 `swap.json`에서 뺀다.
+  - `swap`: 이미지가 다르다(번역). 글자 스프라이트는 번역되면 크기·모양이 통째로 바뀌는 게 정상이다.
+  - `flag`: 사람이 볼 만하다. 이유는 `reasons`에 있다. 거부하기 전까지는 그대로 내보낸다.
+    - `colors`: 색 분포가 크게 다르다(빠진 도장, 단순 리디자인이 섞여 있다).
+    - `english`: OCR로 KR 이미지에서 JP에 없는 영어 단어를 확실하게 읽었고, 한글과 저작권 표기는 없다. KR 빌드에 영어 placeholder가 들어 있는 이미지가 있다. 장식 글꼴은 OCR이 잘 못 읽어서 안 걸렸다고 안심할 수는 없다.
+  - 항목마다 크기·dHash·변화량·팔레트 겹침·OCR 결과를 지문으로 남긴다.
+- `overrides.json`: 사람이 내린 결정. 키는 해시를 뗀 jp 번들 이름(`bundleStem`)이라 빌드가 바뀌어도 유지된다.
+  - `deny`: 번들 전체를 JP 원본으로 둔다.
+  - `revert`: `{ "<stem>": ["스프라이트 이름", ...] }`. 그 스프라이트만 JP로 보이고 나머지는 한국어로 남는다. JP 아틀라스 페이지를 새 페이지로 덧붙이고 config가 그쪽을 가리키게 하며, KR 쪽 같은 이름 스프라이트는 `<이름>@kr`로 바꿔 이름으로는 못 찾게 한다. 페이지 통째로 붙으므로 번들이 커질 수 있다(예: `al` 하나에 +12MB). 아틀라스가 아닌 번들(스프라이트마다 텍스처가 따로 있는 경우)은 지원하지 않아 번들 전체가 JP로 남는다. 다시 만든 결과는 스냅샷의 `reverted`에 남는다.
+- `public/swap.json` = 최신 스냅샷의 `pairs` − `drop` − `deny`, `revert`가 있는 짝은 다시 만든 항목(`[kr, 크기, 페이지, keep]`).
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r tools/requirements.txt   # + tesseract (apt install tesseract-ocr)
+node swap.js && npm run audit && node swap.js   # 새 빌드: 검증 → 감사 → swap.json
+.venv/bin/python tools/audit.py --dump /tmp/flag  # flag 항목의 jp/kr 이미지를 꺼내 보기
+```
 - 한국판이 없는 것(일섭 한정 이벤트·콜라보)과, kr판 구조가 달라 검증에서 떨어진 것(대국 이펙트 프리팹 등)은 일본어로 남는다.
 
 ## 파일
@@ -43,7 +64,9 @@ src/core.js       UnityFS·SerializedFile·TextAsset 읽기/쓰기, LZ4, XOR 키
 src/main.js       브라우저 쪽: fetch 후킹
 src/inject.lua    게임 Lua에 덧붙이는 코드
 build.js          src → public/mahjongsoulKR.user.js
-swap.js           jp·kr 매니페스트 → public/swap.json (이미지 번들 짝, 커밋하지 않음)
+swap.js           jp·kr 매니페스트 → swapdb/builds 스냅샷 → public/swap.json (커밋하지 않음)
+tools/audit.py    짝의 이미지를 디코드해 비교 → swapdb/verdicts.json
+swapdb/           빌드별 짝 기록, 감사 결과, 수동 결정
 public/           jakhon.chamchi.me에 올라가는 파일 (index.html = 설치 안내)
 wrangler.jsonc    Cloudflare 배포 설정
 ```
@@ -55,7 +78,7 @@ wrangler.jsonc    Cloudflare 배포 설정
 npm run deploy
 ```
 
-- `node swap.js`로 `public/swap.json`을 만들고(빌드가 그대로면 건너뜀), `node build.js`로 `public/mahjongsoulKR.user.js`를 만든 다음 `npx wrangler deploy`로 jakhon.chamchi.me에 올린다.
+- `node swap.js` → `npm run audit` → `node swap.js`로 `public/swap.json`을 만들고(빌드가 그대로면 검증은 건너뜀), `node build.js`로 `public/mahjongsoulKR.user.js`를 만든 다음 `npx wrangler deploy`로 jakhon.chamchi.me에 올린다.
 - 게임 빌드만 바뀌었을 때는 버전을 안 올려도 된다. `swap.json`만 새로 올리면 된다.
 - Tampermonkey는 `@updateURL`(jakhon.chamchi.me)에서 버전을 비교해 자동 업데이트한다. 그래서 **버전을 올려야** 사용자에게 반영된다.
 - 로그인이 풀렸으면 `npx wrangler login`.

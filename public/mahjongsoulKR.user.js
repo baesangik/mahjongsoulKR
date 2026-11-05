@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         mahjongsoulKR
 // @namespace    https://jakhon.chamchi.me
-// @version      0.1.0
+// @version      0.2.0
 // @description  일본 서버 작혼(웹)의 텍스트를 게임에 내장된 한국어로 표시합니다 (비공식)
 // @homepageURL  https://jakhon.chamchi.me
 // @supportURL   https://github.com/baesangik/mahjongsoulKR/issues
@@ -485,16 +485,17 @@ const MjsKr = (() => {
   };
 
   // Atlases are "<prefix>_<page>.png" textures plus a "<prefix>_config" TextAsset mapping sprite
-  // name -> page. When the KR atlas lacks sprites the JP one has, the JP page textures holding
-  // them are appended to `swappedBytes` as new pages and the config points those sprites there.
+  // name -> page. When the KR atlas lacks sprites the JP one has, or has some in `keep` (sprite
+  // names to show as JP, e.g. English placeholders), the JP page textures holding them are appended
+  // to `swappedBytes` as new pages and the config points those sprites there.
   // Returns { bytes, pages: [container keys added] }, or null when nothing is missing.
-  function mergeJpSprites(swappedBytes, jpBytes) {
+  function mergeJpSprites(swappedBytes, jpBytes, keep = []) {
     const b = readBundle(swappedBytes);
     const node = serializedNodes(b)[0], sf = readSerialized(node.data);
     const jsf = readSerialized(serializedNodes(readBundle(jpBytes))[0].data);
     const L = sf.little;
     const krSprites = new Set(sf.objects.filter(o => o.classId === 213).map(o => objectName(o, L)));
-    const missing = new Set(jsf.objects.filter(o => o.classId === 213).map(o => objectName(o, jsf.little)).filter(n => !krSprites.has(n)));
+    const missing = new Set(jsf.objects.filter(o => o.classId === 213).map(o => objectName(o, jsf.little)).filter(n => !krSprites.has(n) || keep.includes(n)));
     if (!missing.size) return null;
 
     const config = s => s.objects.find(o => o.classId === TEXT_ASSET && /_config$/.test(objectName(o, s.little)));
@@ -510,6 +511,13 @@ const MjsKr = (() => {
     const typeOf = cls => { const i = sf.types.findIndex(t => t.classId === cls); if (i < 0) throw new Error('no type ' + cls); return i; };
     const byPid = new Map(jsf.objects.map(o => [o.pid.join(','), o]));
     const taken = new Set(sf.objects.map(o => o.pid.join(',')));
+
+    // KR sprites being replaced get renamed so nothing finds them by name any more.
+    for (const o of sf.objects) {
+      const name = o.classId === 213 && objectName(o, L);
+      if (!name || !keep.includes(name)) continue;
+      o.data = concat([strBytes(name + '@kr', L), o.data.subarray(4 + ((enc.encode(name).length + 3) & ~3))]);
+    }
 
     let next = Math.max(...Object.values(krCfg)) + 1;
     const pages = [];
@@ -644,7 +652,7 @@ const MjsKr = (() => {
     if (!r.ok) throw new Error('swap.json ' + r.status);
     const { pairs } = await r.json();
     const krBase = new URL(base.href.replace('/v4/jp/', '/v4/kr/'));
-    return new Map(Object.entries(pairs).map(([jp, [kr, size, pages]]) => [jp, { kr: new URL(kr, krBase).href, krName: kr, size, pages: pages || [] }]));
+    return new Map(Object.entries(pairs).map(([jp, [kr, size, pages, keep]]) => [jp, { kr: new URL(kr, krBase).href, krName: kr, size, pages: pages || [], keep: keep || [] }]));
   }
 
   async function onManifest(input, init) {
@@ -674,14 +682,14 @@ const MjsKr = (() => {
   }
 
   // The manifest already promised `size` bytes; anything else falls back to the JP original.
-  // Entries with pages also need the JP original, for sprites only it has.
+  // Entries with pages also need the JP original, for sprites only it has (or that `keep` shows as JP).
   async function serveSwap(name, s, input, init) {
     try {
       const [r, jr] = await Promise.all([realFetch(s.kr, { cache: 'no-store' }), s.pages.length ? realFetch(input, init) : null]);
       if (!r.ok) throw new Error('kr fetch ' + r.status);
       if (jr && !jr.ok) throw new Error('jp fetch ' + jr.status);
       let bytes = MjsKr.swapBundle(new Uint8Array(await r.arrayBuffer()), s.krName, name);
-      if (jr) bytes = MjsKr.mergeJpSprites(bytes, new Uint8Array(await jr.arrayBuffer())).bytes;
+      if (jr) bytes = MjsKr.mergeJpSprites(bytes, new Uint8Array(await jr.arrayBuffer()), s.keep).bytes;
       if (bytes.length !== s.size) throw new Error(`size ${bytes.length} != ${s.size}`);
       console.log(TAG, 'swapped', name);
       return bundleResponse(bytes);
