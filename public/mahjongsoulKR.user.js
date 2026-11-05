@@ -151,7 +151,8 @@ const MjsKr = (() => {
     if (version < 22) throw new Error('serialized version ' + version);
     r.p = 16;
     const little = r.u8() === 0;
-    r.p = 20; r.u32();
+    r.p = 20;
+    const metaEnd = 48 + r.u32();
     const fileSizePos = 24; r.i64();
     const dataOffset = r.i64();
     r.p = 48; r.le = little;
@@ -172,14 +173,46 @@ const MjsKr = (() => {
       types.push({ classId, scriptIdx });
     }
     const objects = [];
+    const tableStart = r.p;
     for (let n = r.i32(); n > 0; n--) {
       r.align(4);
-      const o = { entry: r.p, pathId: r.i64(), start: r.i64(), size: r.u32(), typeId: r.i32() };
+      const o = { entry: r.p, pid: buf.slice(r.p, r.p + 8), pathId: r.i64(), start: r.i64(), size: r.u32(), typeId: r.i32() };
       o.classId = types[o.typeId].classId;
       o.data = buf.slice(dataOffset + o.start, dataOffset + o.start + o.size);
       objects.push(o);
     }
-    return { buf, little, dataOffset, fileSizePos, objects };
+    return { buf, little, dataOffset, fileSizePos, metaEnd, tableStart, tableEnd: r.p, types, objects };
+  }
+
+  // Like writeSerialized, but also rebuilds the object table, so objects may be added:
+  // each new one needs pid (8 raw pathID bytes), typeId (index into sf.types) and data.
+  function writeSerializedTable(sf) {
+    const { buf, little } = sf;
+    const w = new Writer();
+    w.push(buf.subarray(0, sf.tableStart));
+    const count = new Uint8Array(4);
+    new DataView(count.buffer).setInt32(0, sf.objects.length, little);
+    w.push(count);
+    const entries = [];
+    for (const o of sf.objects) { w.align(4); entries.push(w.len); w.push(o.pid); w.push(new Uint8Array(16)); }
+    w.push(buf.subarray(sf.tableEnd, sf.metaEnd));
+    const metaEnd = w.len;
+    const dataOffset = sf.dataOffset + ((metaEnd - sf.metaEnd + 15) & ~15);
+    let pos = 0;
+    const starts = sf.objects.map(o => { pos = (pos + 7) & ~7; const s = pos; pos += o.data.length; return s; });
+    const out = new Uint8Array(dataOffset + pos);
+    out.set(w.out());
+    const dv = new DataView(out.buffer);
+    sf.objects.forEach((o, i) => {
+      dv.setBigInt64(entries[i] + 8, BigInt(starts[i]), little);
+      dv.setUint32(entries[i] + 16, o.data.length, little);
+      dv.setInt32(entries[i] + 20, o.typeId, little);
+      out.set(o.data, dataOffset + starts[i]);
+    });
+    dv.setUint32(20, metaEnd - 48, false);
+    dv.setBigInt64(sf.fileSizePos, BigInt(out.length), false);
+    dv.setBigInt64(32, BigInt(dataOffset), false);
+    return out;
   }
 
   function writeSerialized(sf) {
@@ -283,11 +316,20 @@ const MjsKr = (() => {
       const name = str(); bundles.push({ name, sizePos: p }); p += 4;
     }
     const assets = [];
+    const assetCountPos = p;
     for (let n = v.getInt32(p, little), i = (p += 4, 0); i < n; i++) {
       const path = str(); assets.push({ path, owner: v.getInt32(p, little) }); p += 4;
     }
-    return { bundles, assets };
+    return { bundles, assets, assetCountPos, assetsEnd: p };
   }
+
+  const i32Bytes = (x, little) => { const a = new Uint8Array(4); new DataView(a.buffer).setInt32(0, x, little); return a; };
+  const strBytes = (s, little) => {
+    const b = enc.encode(s), a = new Uint8Array(4 + ((b.length + 3) & ~3));
+    new DataView(a.buffer).setInt32(0, b.length, little); a.set(b, 4);
+    return a;
+  };
+  const concat = parts => { const w = new Writer(); for (const x of parts) w.push(x); return w.out(); };
 
   // ---------- public API ----------
 
@@ -307,8 +349,8 @@ const MjsKr = (() => {
     return null;
   }
 
-  // Rewrites fileSize for bundleName in the manifest. Returns new manifest bytes.
-  function setManifestSize(manifestBytes, bundleName, size) {
+  // Returns { bundles: [{ name, size }], assets: [{ path, owner }] } from the manifest bundle bytes.
+  function readManifest(manifestBytes) {
     const b = readBundle(manifestBytes);
     for (const node of serializedNodes(b)) {
       const sf = readSerialized(node.data);
@@ -316,14 +358,201 @@ const MjsKr = (() => {
         if (o.classId !== 114) continue;
         let m;
         try { m = parseManifest(o.data, sf.little); } catch (e) { continue; }
-        const e = m.bundles.find(x => x.name === bundleName);
-        if (!e) continue;
-        new DataView(o.data.buffer, o.data.byteOffset).setInt32(e.sizePos, size, sf.little);
-        node.data = writeSerialized(sf);
-        return writeBundle(b);
+        if (!m.assets.length) continue;
+        const v = new DataView(o.data.buffer, o.data.byteOffset);
+        return { bundles: m.bundles.map(x => ({ name: x.name, size: v.getInt32(x.sizePos, sf.little) })), assets: m.assets };
       }
     }
     return null;
+  }
+
+  // Rewrites fileSize for every bundle in `sizes` (Map name -> size) that the manifest lists, and
+  // registers `addAssets` ([assetPath, bundleName]) whose bundle it lists.
+  // Returns { bytes, found: Set of names updated }, or null if the bundle table was not found.
+  function setManifestSizes(manifestBytes, sizes, addAssets = []) {
+    const b = readBundle(manifestBytes);
+    for (const node of serializedNodes(b)) {
+      const sf = readSerialized(node.data);
+      for (const o of sf.objects) {
+        if (o.classId !== 114) continue;
+        let m;
+        try { m = parseManifest(o.data, sf.little); } catch (e) { continue; }
+        if (!m.assets.length) continue;
+        const v = new DataView(o.data.buffer, o.data.byteOffset);
+        const found = new Set();
+        for (const e of m.bundles) {
+          if (!sizes.has(e.name)) continue;
+          v.setInt32(e.sizePos, sizes.get(e.name), sf.little);
+          found.add(e.name);
+        }
+        const index = new Map(m.bundles.map((e, i) => [e.name, i]));
+        const known = new Set(m.assets.map(a => a.path));
+        const extra = addAssets.filter(([path, name]) => index.has(name) && !known.has(path));
+        if (extra.length) {
+          v.setInt32(m.assetCountPos, m.assets.length + extra.length, sf.little);
+          const added = extra.flatMap(([path, name]) => [strBytes(path, sf.little), i32Bytes(index.get(name), sf.little)]);
+          o.data = concat([o.data.subarray(0, m.assetsEnd), ...added, o.data.subarray(m.assetsEnd)]);
+        }
+        node.data = writeSerialized(sf);
+        return { bytes: writeBundle(b), found };
+      }
+    }
+    return null;
+  }
+
+  // ---------- language bundle swap ----------
+  // The JP client always asks for `.../jp/...` assets. A bundle from the KR build is renamed in
+  // place so it passes for its JP twin: the bundle name stem and standalone `kr` tokens in
+  // names/paths become their `jp` forms. Every rename keeps its length, so no offset moves.
+  const LANG_SWAP = { kr: 'jp', KR: 'JP', Kr: 'Jp' };
+  const BINARY_CLASSES = new Set([28, 43, 48, 83, 128]); // Texture2D, Mesh, Shader, AudioClip, Font: m_Name only
+  const isAlnum = c => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+  const isPrint = c => c >= 32 && c < 127;
+
+  // Bundle file names are "<stem>_<20 hex content hash>"; the stem is the AssetBundle's own name.
+  const bundleStem = name => name.replace(/_[0-9a-f]{20}$/, '');
+
+  function replaceBytes(buf, from, to) {
+    outer: for (let i = 0; i + from.length <= buf.length; i++) {
+      for (let j = 0; j < from.length; j++) if (buf[i + j] !== from[j]) continue outer;
+      buf.set(to, i);
+      i += from.length - 1;
+    }
+  }
+
+  // A token only counts inside text: three printable bytes before it (the last one not alphanumeric),
+  // and after it a non-alphanumeric printable byte, a NUL or the end. Keeps binary payloads intact.
+  function swapLangTokens(buf) {
+    for (let i = 3; i + 1 < buf.length; i++) {
+      const t = LANG_SWAP[String.fromCharCode(buf[i], buf[i + 1])];
+      if (!t) continue;
+      const before = buf[i - 1], after = i + 2 < buf.length ? buf[i + 2] : 0;
+      if (!isPrint(before) || isAlnum(before) || !isPrint(buf[i - 2]) || !isPrint(buf[i - 3])) continue;
+      if (after !== 0 && (!isPrint(after) || isAlnum(after))) continue;
+      buf[i] = t.charCodeAt(0); buf[i + 1] = t.charCodeAt(1); i++;
+    }
+  }
+
+  // krBytes: KR build bundle `krName`; returns it renamed to pass as JP bundle `jpName` (uncompressed).
+  function swapBundle(krBytes, krName, jpName) {
+    const krStem = bundleStem(krName), jpStem = bundleStem(jpName);
+    if (krStem.length !== jpStem.length) throw new Error('bundle names differ in length');
+    const from = enc.encode(krStem), to = enc.encode(jpStem);
+    const b = readBundle(krBytes);
+    for (const node of serializedNodes(b)) {
+      const sf = readSerialized(node.data);
+      for (const o of sf.objects) {
+        let len = o.data.length;
+        if (BINARY_CLASSES.has(o.classId)) {
+          const n = len >= 4 ? new DataView(o.data.buffer, o.data.byteOffset).getInt32(0, sf.little) : -1;
+          len = n >= 0 && n + 4 <= len ? n + 4 : 0;
+        }
+        const region = node.data.subarray(sf.dataOffset + o.start, sf.dataOffset + o.start + len);
+        replaceBytes(region, from, to);
+        swapLangTokens(region);
+      }
+    }
+    return writeBundle(b);
+  }
+
+  // ---------- AssetBundle object (class 142): name, preload table, container; the rest kept as is ----------
+  function readAssetBundle(data, little) {
+    const r = new Reader(data, 0, little);
+    const name = dec.decode(r.bytes(r.i32())); r.align(4);
+    const preload = [];
+    for (let n = r.i32(); n > 0; n--) preload.push(r.bytes(12).slice()); // PPtr: fileID i32, pathID i64
+    const container = [];
+    for (let n = r.i32(); n > 0; n--) {
+      const key = dec.decode(r.bytes(r.i32())); r.align(4);
+      container.push({ key, index: r.i32(), size: r.i32(), asset: r.bytes(12).slice() });
+    }
+    return { name, preload, container, rest: data.slice(r.p) };
+  }
+
+  function writeAssetBundle(ab, little) {
+    return concat([
+      strBytes(ab.name, little),
+      i32Bytes(ab.preload.length, little), ...ab.preload,
+      i32Bytes(ab.container.length, little),
+      ...ab.container.flatMap(c => [strBytes(c.key, little), i32Bytes(c.index, little), i32Bytes(c.size, little), c.asset]),
+      ab.rest,
+    ]);
+  }
+
+  const objectName = (o, little) => {
+    const n = o.data.length >= 4 ? new DataView(o.data.buffer, o.data.byteOffset).getInt32(0, little) : -1;
+    return n >= 0 && n + 4 <= o.data.length ? dec.decode(o.data.subarray(4, 4 + n)) : '';
+  };
+
+  // Atlases are "<prefix>_<page>.png" textures plus a "<prefix>_config" TextAsset mapping sprite
+  // name -> page. When the KR atlas lacks sprites the JP one has, the JP page textures holding
+  // them are appended to `swappedBytes` as new pages and the config points those sprites there.
+  // Returns { bytes, pages: [container keys added] }, or null when nothing is missing.
+  function mergeJpSprites(swappedBytes, jpBytes) {
+    const b = readBundle(swappedBytes);
+    const node = serializedNodes(b)[0], sf = readSerialized(node.data);
+    const jsf = readSerialized(serializedNodes(readBundle(jpBytes))[0].data);
+    const L = sf.little;
+    const krSprites = new Set(sf.objects.filter(o => o.classId === 213).map(o => objectName(o, L)));
+    const missing = new Set(jsf.objects.filter(o => o.classId === 213).map(o => objectName(o, jsf.little)).filter(n => !krSprites.has(n)));
+    if (!missing.size) return null;
+
+    const config = s => s.objects.find(o => o.classId === TEXT_ASSET && /_config$/.test(objectName(o, s.little)));
+    const krCfgObj = config(sf), jpCfgObj = config(jsf);
+    if (!krCfgObj || !jpCfgObj) throw new Error('missing sprites outside an atlas');
+    const krCfgText = readTextAsset(krCfgObj, L);
+    const krCfg = JSON.parse(dec.decode(krCfgText.script));
+    const jpCfg = JSON.parse(dec.decode(readTextAsset(jpCfgObj, jsf.little).script));
+
+    const abObj = sf.objects.find(o => o.classId === 142);
+    const ab = readAssetBundle(abObj.data, L);
+    const jab = readAssetBundle(jsf.objects.find(o => o.classId === 142).data, jsf.little);
+    const typeOf = cls => { const i = sf.types.findIndex(t => t.classId === cls); if (i < 0) throw new Error('no type ' + cls); return i; };
+    const byPid = new Map(jsf.objects.map(o => [o.pid.join(','), o]));
+    const taken = new Set(sf.objects.map(o => o.pid.join(',')));
+
+    let next = Math.max(...Object.values(krCfg)) + 1;
+    const pages = [];
+    for (const page of [...new Set([...missing].map(n => jpCfg[n]))].sort()) {
+      const entry = jab.container.find(c => c.key.endsWith(`_${page}.png`));
+      if (!entry) throw new Error('JP page ' + page + ' not in container');
+      const objs = jab.preload.slice(entry.index, entry.index + entry.size).map(p => byPid.get(p.subarray(4).join(','))).filter(Boolean);
+      const tex = objs.find(o => o.classId === 28);
+      const sprites = objs.filter(o => o.classId === 213 && missing.has(objectName(o, jsf.little)));
+      if (!tex || !sprites.length) throw new Error('JP page ' + page + ' has no texture/sprites');
+      const added = [tex, ...sprites];
+      if (added.some(o => taken.has(o.pid.join(',')))) throw new Error('pathID clash');
+
+      const texName = objectName(tex, jsf.little).replace(/_\d+$/, '_' + next);
+      const nameEnd = 4 + ((enc.encode(objectName(tex, jsf.little)).length + 3) & ~3);
+      const texData = concat([strBytes(texName, L), tex.data.subarray(nameEnd)]);
+      const index = ab.preload.length;
+      for (const o of added) {
+        sf.objects.push({ pid: o.pid, typeId: typeOf(o.classId), classId: o.classId, data: o === tex ? texData : o.data });
+        ab.preload.push(concat([i32Bytes(0, L), o.pid]));
+      }
+      const key = entry.key.replace(/_\d+\.png$/, `_${next}.png`);
+      // One container entry per sub-asset, all sharing the page's key and preload range (as Unity writes it).
+      for (const o of added) ab.container.push({ key, index, size: added.length, asset: concat([i32Bytes(0, L), o.pid]) });
+      for (const o of sprites) krCfg[objectName(o, jsf.little)] = next;
+      pages.push(key);
+      next++;
+    }
+    abObj.data = writeAssetBundle(ab, L);
+    krCfgText.script = enc.encode(JSON.stringify(krCfg));
+    writeTextAsset(krCfgObj, L, krCfgText);
+    node.data = writeSerializedTable(sf);
+    return { bytes: writeBundle(b), pages };
+  }
+
+  // For offline checks: [{ classId, data }] of every object in a bundle.
+  function listObjects(bundleBytes) {
+    const out = [];
+    for (const node of serializedNodes(readBundle(bundleBytes))) {
+      const sf = readSerialized(node.data);
+      for (const o of sf.objects) out.push({ classId: o.classId, data: o.data });
+    }
+    return out;
   }
 
   // Patches the Lua TextAsset whose name matches `scriptName` (e.g. "GameMgr.lua"):
@@ -368,20 +597,23 @@ const MjsKr = (() => {
     return null;
   }
 
-  return { locate, setManifestSize, patchLuaBundle, extractLua, xor, readBundle };
+  return { locate, readManifest, setManifestSizes, patchLuaBundle, extractLua, xor, readBundle, bundleStem, swapBundle, mergeJpSprites, listObjects, readAssetBundle };
 })();
 
 
-// Browser glue: intercept the bundle manifest and the bundle holding GameMgr.lua.
+// Browser glue: intercept the bundle manifest, the bundle holding GameMgr.lua and the language
+// bundles listed in swap.json (served from the KR build, renamed to pass as the JP ones).
 (() => {
   'use strict';
   const TAG = '[mjs-kr]';
   const TARGET_ASSET = '/GameMgr.lua.bytes';
   const TARGET_SCRIPT = 'GameMgr.lua';
   const MANIFEST_RE = /\/resources\/ab\/.+\/bundle_info_so\.[^/?]+(\?|$)/;
+  const SWAP_URL = 'https://jakhon.chamchi.me/swap.json';
 
   const realFetch = window.fetch.bind(window);
   let target = null; // { name, bytes } once the patched bundle is ready
+  const swaps = new Map(); // jp bundle name -> { kr: url, size }
 
   const urlOf = input => (typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
   const fileOf = url => new URL(url, location.href).pathname.split('/').pop();
@@ -392,37 +624,82 @@ const MjsKr = (() => {
     headers.delete('content-encoding');
     return new Response(bytes, { status: orig.status, statusText: orig.statusText, headers });
   }
+  const bundleResponse = bytes => new Response(bytes, { status: 200, headers: { 'content-type': 'application/octet-stream' } });
+
+  async function prepareLua(raw, base) {
+    const name = MjsKr.locate(raw, TARGET_ASSET);
+    if (!name) throw new Error('GameMgr.lua not found in manifest');
+    const br = await realFetch(new URL(name, base).href, { cache: 'no-store' });
+    if (!br.ok) throw new Error('bundle fetch ' + br.status);
+    const patched = MjsKr.patchLuaBundle(new Uint8Array(await br.arrayBuffer()), TARGET_SCRIPT, MJS_KR_LUA, m => console.log(TAG, m));
+    if (!patched) throw new Error('GameMgr.lua not found in ' + name);
+    return { name, bytes: patched };
+  }
+
+  // Entries are keyed by full bundle names (content hashes included), so a stale swap.json
+  // simply matches nothing in a newer manifest.
+  async function prepareSwap(base) {
+    if (!/\/v4\/jp\//.test(base.pathname)) throw new Error('unexpected manifest path ' + base.pathname);
+    const r = await realFetch(SWAP_URL, { cache: 'no-store' });
+    if (!r.ok) throw new Error('swap.json ' + r.status);
+    const { pairs } = await r.json();
+    const krBase = new URL(base.href.replace('/v4/jp/', '/v4/kr/'));
+    return new Map(Object.entries(pairs).map(([jp, [kr, size, pages]]) => [jp, { kr: new URL(kr, krBase).href, krName: kr, size, pages: pages || [] }]));
+  }
 
   async function onManifest(input, init) {
     const res = await realFetch(input, init);
     if (!res.ok) return res;
     const raw = new Uint8Array(await res.clone().arrayBuffer());
+    const base = new URL(urlOf(input), location.href);
+    const [lua, swap] = await Promise.all([
+      prepareLua(raw, base).catch(e => { console.warn(TAG, 'text disabled, stays Japanese:', e); return null; }),
+      prepareSwap(base).catch(e => { console.warn(TAG, 'image swap disabled:', e); return null; }),
+    ]);
     try {
-      const name = MjsKr.locate(raw, TARGET_ASSET);
-      if (!name) throw new Error('GameMgr.lua not found in manifest');
-      const bundleUrl = new URL(name, new URL(urlOf(input), location.href)).href;
-      const br = await realFetch(bundleUrl, { cache: 'no-store' });
-      if (!br.ok) throw new Error('bundle fetch ' + br.status);
-      const patched = MjsKr.patchLuaBundle(new Uint8Array(await br.arrayBuffer()), TARGET_SCRIPT, MJS_KR_LUA, m => console.log(TAG, m));
-      if (!patched) throw new Error('GameMgr.lua not found in ' + name);
-      const manifest = MjsKr.setManifestSize(raw, name, patched.length);
-      if (!manifest) throw new Error('could not update manifest');
-      target = { name, bytes: patched };
-      console.log(TAG, 'ready:', name, patched.length, 'bytes');
-      return respond(res, manifest);
+      const sizes = new Map(), pages = [];
+      if (swap) for (const [jp, s] of swap) { sizes.set(jp, s.size); for (const p of s.pages) pages.push([p, jp]); }
+      if (lua) sizes.set(lua.name, lua.bytes.length);
+      if (!sizes.size) return respond(res, raw);
+      const out = MjsKr.setManifestSizes(raw, sizes, pages);
+      if (!out) throw new Error('could not update manifest');
+      if (lua && out.found.has(lua.name)) target = lua;
+      if (swap) for (const [jp, s] of swap) if (out.found.has(jp) && jp !== (lua && lua.name)) swaps.set(jp, s);
+      console.log(TAG, 'ready:', target ? target.name : 'no text patch', '/', swaps.size, 'image bundles to swap');
+      return respond(res, out.bytes);
     } catch (e) {
       console.warn(TAG, 'disabled, game stays Japanese:', e);
       return respond(res, raw);
     }
   }
 
+  // The manifest already promised `size` bytes; anything else falls back to the JP original.
+  // Entries with pages also need the JP original, for sprites only it has.
+  async function serveSwap(name, s, input, init) {
+    try {
+      const [r, jr] = await Promise.all([realFetch(s.kr, { cache: 'no-store' }), s.pages.length ? realFetch(input, init) : null]);
+      if (!r.ok) throw new Error('kr fetch ' + r.status);
+      if (jr && !jr.ok) throw new Error('jp fetch ' + jr.status);
+      let bytes = MjsKr.swapBundle(new Uint8Array(await r.arrayBuffer()), s.krName, name);
+      if (jr) bytes = MjsKr.mergeJpSprites(bytes, new Uint8Array(await jr.arrayBuffer())).bytes;
+      if (bytes.length !== s.size) throw new Error(`size ${bytes.length} != ${s.size}`);
+      console.log(TAG, 'swapped', name);
+      return bundleResponse(bytes);
+    } catch (e) {
+      console.warn(TAG, 'swap failed, serving JP original:', name, e);
+      return realFetch(input, init);
+    }
+  }
+
   window.fetch = function (input, init) {
     const url = urlOf(input);
     if (url && MANIFEST_RE.test(url)) return onManifest(input, init);
-    if (target && url && fileOf(url) === target.name) {
+    const name = url && fileOf(url);
+    if (target && name === target.name) {
       console.log(TAG, 'serving patched', target.name);
-      return Promise.resolve(new Response(target.bytes.slice(), { status: 200, headers: { 'content-type': 'application/octet-stream' } }));
+      return Promise.resolve(bundleResponse(target.bytes.slice()));
     }
+    if (swaps.has(name)) return serveSwap(name, swaps.get(name), input, init);
     return realFetch(input, init);
   };
   console.log(TAG, 'fetch hook installed');

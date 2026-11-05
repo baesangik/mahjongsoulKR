@@ -4,3 +4,7 @@
 
 /version.txt
   Cache-Control: no-cache
+
+/swap.json
+  Cache-Control: no-cache
+  Access-Control-Allow-Origin: *
