@@ -5,11 +5,15 @@
 // (tools/imgindex.py): a JP language bundle that vanished and one that appeared holding the same
 // pixels are the same asset under a new path, and a deny entry that no longer matches anything
 // is looked up the same way. Nothing is changed; the report only suggests.
+// It also checks the pairing rule against the game's own list of localized images (tools/langcheck.js).
 // --json writes { block, attention }: `block` lists signs that the game was restructured (the
-// canary failed, most pairs or JP language bundles vanished); tools/gate.js won't publish then.
+// canary failed, most pairs or JP language bundles vanished, localizedImg stopped resolving to jp/
+// folders); tools/gate.js won't publish then.
 const fs = require('fs');
 const path = require('path');
 const MjsKr = require('../src/core.js');
+const ov = require('./overrides.js');
+const langcheck = require('./langcheck.js');
 
 const ROOT = path.join(__dirname, '..');
 const DB = path.join(ROOT, 'swapdb');
@@ -152,10 +156,18 @@ function main() {
   const flagged = fresh.map(n => [n, verdicts[`${n} ${cur.pairs[n][0]}`]]).filter(([, v]) => !v || v.verdict === 'flag');
   say('', '## 감사 (이번에 새로 들어오거나 바뀐 짝)', '');
   if (!flagged.length) say('플래그 없음');
-  const decided = n => stem(n) in (overrides.deny || {});
-  for (const [n, v] of flagged) say(`- ${where(curJp, n)} \`${stem(n)}\`: ${v ? v.reasons.join(', ') : '감사 안 됨'}${decided(n) ? ' (overrides에서 처리함)' : ''}`);
-  const open = flagged.filter(([n]) => !decided(n)).length;
+  const pathsOf = n => (curJp && curJp.owner.get(n)) || [];
+  const hold = readJson(path.join(DB, 'hold.json'), {});
+  const held = new Set(Object.values(hold).map(h => h.jp));
+  const decided = n => ov.lookup(overrides.deny, n, pathsOf(n)).length > 0 || (verdicts[`${n} ${cur.pairs[n][0]}`] && !ov.openReasons(verdicts[`${n} ${cur.pairs[n][0]}`], ov.lookup(overrides.accept, n, pathsOf(n))).length);
+  for (const [n, v] of flagged) say(`- ${where(curJp, n)} \`${stem(n)}\`: ${v ? v.reasons.join(', ') : '감사 안 됨'}${decided(n) ? ' (overrides에서 처리함)' : held.has(n) ? ' (보류 중)' : ''}`);
+  const open = flagged.filter(([n]) => !decided(n) && !held.has(n)).length;
   if (open) attention.push(`처리 안 된 플래그·미감사 ${open}개`);
+  const holds = Object.entries(hold);
+  if (holds.length) {
+    say('', `### 보류 (JP로 둠, swapdb/hold.json)`, '', ...holds.map(([k, h]) => `- \`${k}\` (${h.since}부터): ${h.reasons.join(', ')} → 괜찮으면 \`node tools/overrides.js accept "${k}"\`, 아니면 \`deny\``));
+    attention.push(`보류 중인 짝 ${holds.length}개`);
+  }
 
   // JP language bundles that vanished / appeared, traced by image
   if (prevJp && curJp) {
@@ -200,28 +212,56 @@ function main() {
   const curByStem = curJp ? new Map([...curJp.owner.keys()].map(n => [stem(n), n])) : new Map();
   const oldBundle = s => { for (const m of allJpManifests()) for (const n of m ? m.owner.keys() : []) if (stem(n) === s && index('jp', n)) return n; return null; };
   let orphans = 0;
-  for (const s of Object.keys(overrides.deny || {})) {
-    const nowName = curByStem.get(s);
-    if (!nowName) {
-      if (!curJp) continue;
-      orphans++;
-      const old = oldBundle(s);
-      let hint = '예전 번들 색인 없음';
-      if (old) {
-        let best = null;
-        for (const [, n] of curByStem) {
-          const ni = index('jp', n);
-          if (!ni) continue;
-          const o = overlap(index('jp', old), ni), score = o.of ? (o.exact + o.look) / o.of : 0;
-          if (score >= 0.5 && (!best || score > best.score)) best = { n, score };
-        }
-        hint = best ? `옮겨 간 곳으로 보임: \`${stem(best.n)}\` ${where(curJp, best.n)}` : '닮은 번들 없음';
-      }
-      say(`- deny \`${s}\` 가 이번 빌드에 없음 → ${hint}`);
+  for (const sec of ['deny', 'accept']) for (const k of Object.keys(overrides[sec] || {})) {
+    if (!curJp || [...curJp.owner].some(([n, ps]) => ov.covers(k, n, ps))) {
+      if (curJp && ov.isStem(k)) say(`- ${sec} \`${k}\`: 옛 stem 키 → \`node tools/overrides.js migrate\``);
+      continue;
     }
+    orphans++;
+    // The bundle the key used to match, in an older build, traced to where its images went.
+    let old = null;
+    for (const m of allJpManifests()) for (const [n, ps] of m ? m.owner : []) if (!old && ov.covers(k, n, ps) && index('jp', n)) old = n;
+    let hint = '예전 번들 색인 없음';
+    if (old) {
+      let best = null;
+      for (const [n] of curJp.owner) {
+        const ni = index('jp', n);
+        if (!ni || !LANG.test((curJp.owner.get(n) || [])[0] || '')) continue;
+        const o = overlap(index('jp', old), ni), score = o.of ? (o.exact + o.look) / o.of : 0;
+        if (score >= 0.5 && (!best || score > best.score)) best = { n, score };
+      }
+      hint = best ? `옮겨 간 곳으로 보임: \`${ov.bundleKey(curJp.owner.get(best.n))}\`` : '닮은 번들 없음';
+    }
+    say(`- ${sec} \`${k}\` 가 이번 빌드에 없음 → ${hint}`);
   }
   if (!orphans) say('모두 이번 빌드에 맞음');
   else attention.push(`맞는 데가 없는 overrides ${orphans}개`);
+
+  // The pairing rule against the game's own list of localized images
+  say('', '## 언어 규칙 교차검증 (localizedImg_jp)', '');
+  const lc = langcheck.check(cur, ARCHIVE), lcPrev = prev && langcheck.check(prev, ARCHIVE);
+  if (!lc) say('이 빌드의 매니페스트가 보관소에 없음');
+  else if (lc.missing) { say('localizedImg_jp.json을 못 찾음'); attention.push('localizedImg_jp.json이 없어짐 (언어 이미지 목록 형식이 바뀌었을 수 있다)'); }
+  else {
+    const pct = (a, b) => b ? Math.round(a / b * 100) + '%' : '-';
+    say(`언어 항목 ${lc.entries}개 중 jp 폴더로 풀림 ${lc.resolved} (${pct(lc.resolved, lc.entries)}), 짝 있는 번들에 듦 ${lc.covered} (${pct(lc.covered, lc.resolved)})` +
+      (lcPrev && !lcPrev.missing ? ` — 이전 빌드 ${lcPrev.resolved} / ${lcPrev.covered}` : ''));
+    if (lc.resolved < lc.entries * 0.5) block.push(`localizedImg 항목이 jp 폴더로 거의 안 풀림 (${lc.resolved}/${lc.entries}): 언어 폴더 규칙이 바뀌었을 수 있다`);
+    if (lcPrev && !lcPrev.missing && lc.covered < lcPrev.covered * 0.7) block.push(`localizedImg 기준 커버리지 급락 (${lcPrev.covered} → ${lc.covered})`);
+    const was = new Set(lcPrev && !lcPrev.missing ? lcPrev.unpaired.map(u => stem(u.name)) : []);
+    const fresh = lc.unpaired.filter(u => !was.has(stem(u.name)));
+    const groups = {};
+    for (const u of lc.unpaired) (groups[u.why.replace(/:.*/, '')] ||= []).push(u);
+    for (const [why, us] of Object.entries(groups)) {
+      const n = us.reduce((a, u) => a + u.entries, 0);
+      say(`- ${why}: 번들 ${us.length}개, 항목 ${n}개${why === 'KR 빌드에 kr 버전 없음' ? ' (JP 전용 콘텐츠, 정상)' : ''}`);
+      if (why !== 'KR 빌드에 kr 버전 없음') for (const u of us.slice(0, 20)) say(`  - ${where(curJp, u.name)} 항목 ${u.entries}: ${u.why}`);
+    }
+    if (prev && fresh.length) {
+      say('', '### 이번에 새로 짝 없는 언어 번들', '', ...fresh.slice(0, 40).map(u => `- ${where(curJp, u.name)}: ${u.why}`));
+      if (fresh.some(u => u.why !== 'KR 빌드에 kr 버전 없음')) attention.push(`localizedImg에 있는데 짝이 없는 새 번들 ${fresh.length}개`);
+    }
+  }
 
   // The text patch: canary result and Lua changes since the previous build
   say('', '## 텍스트 패치 (canary)', '');

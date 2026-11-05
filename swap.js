@@ -3,11 +3,13 @@
 // the way the userscript will, and keeps only pairs whose result matches the JP bundle's layout.
 // Each build pair (bundle_hash.txt) gets one snapshot in swapdb/builds; when it exists already, only
 // the filtering below reruns. public/swap.json is the snapshot minus pairs that
-// swapdb/verdicts.json (tools/audit.py, optional) marks drop and pairs swapdb/overrides.json denies.
+// swapdb/verdicts.json (tools/audit.py, optional) marks drop, pairs swapdb/overrides.json denies,
+// and new pairs held for a look (swapdb/hold.json).
 // Rule: a JP bundle shows either exactly as on the KR server or as the JP original, nothing between.
 const fs = require('fs');
 const path = require('path');
 const MjsKr = require('./src/core.js');
+const overrides = require('./tools/overrides.js');
 
 const CDN = 'https://appstatic.mahjongsoul.com/v4';
 const AB = '/resources/ab/WebGL/ASTC/';
@@ -116,7 +118,11 @@ function manifestPath(paths, key) {
   return sibling.replace(/_\d+\.png$/, key.match(/_\d+\.png$/)[0]);
 }
 
-const jpManifest = async () => MjsKr.readManifest(await get(`${CDN}/jp${AB}bundle_info_so.majset`));
+// A build's manifest, from the archive when it is there (tools/worker.sh mirrors it).
+async function manifest(lang, hash) {
+  const file = path.join(__dirname, '.cache/archive/manifests', lang, hash + '.majset');
+  return MjsKr.readManifest(fs.existsSync(file) ? new Uint8Array(fs.readFileSync(file)) : await get(`${CDN}/${lang}${AB}bundle_info_so.majset`));
+}
 
 // jp bundle name -> the asset paths it holds
 function assetPaths(m) {
@@ -144,8 +150,8 @@ async function buildPair(jpName, krName, paths) {
 
 // Validates the candidate pairs of this build pair, reusing the results of `prev` (an earlier
 // snapshot): bundle names carry content hashes, so a pair seen before keeps its outcome.
-async function validate(prev) {
-  const [jp, kr] = await Promise.all([jpManifest(), get(`${CDN}/kr${AB}bundle_info_so.majset`).then(MjsKr.readManifest)]);
+async function validate(prev, jpHash, krHash) {
+  const [jp, kr] = await Promise.all([manifest('jp', jpHash), manifest('kr', krHash)]);
   const pairs = [...pairBundles(jp, kr)];
   console.log(`${pairs.length} candidate pairs`);
   const jpOwn = assetPaths(jp);
@@ -181,7 +187,7 @@ async function main() {
   let snap = snapName && readJson(path.join(buildsDir, snapName));
   if (!snap || force) {
     const last = names.length ? readJson(path.join(buildsDir, names[names.length - 1])) : { pairs: {}, rejected: {} };
-    snap = { jp: jpHash, kr: krHash, date: new Date().toISOString().slice(0, 10), ...(await validate(force ? { pairs: {}, rejected: {} } : last)) };
+    snap = { jp: jpHash, kr: krHash, date: new Date().toISOString().slice(0, 10), ...(await validate(force ? { pairs: {}, rejected: {} } : last, jpHash, krHash)) };
     snapName = snapName || snap.date + tag;
     fs.writeFileSync(path.join(buildsDir, snapName), JSON.stringify(snap, null, 1) + '\n');
     console.log(`wrote swapdb/builds/${snapName}: ${Object.keys(snap.pairs).length} pairs, ${Object.keys(snap.rejected).length} rejected`);
@@ -189,17 +195,34 @@ async function main() {
     console.log(`builds unchanged (swapdb/builds/${snapName})`);
   }
 
+  // Decisions: deny and drop take a pair out; a new pair whose KR image reads as English where the
+  // JP one had none is held (kept JP) until someone accepts it, since that is a known way for a KR
+  // asset to look wrong. Held pairs stay held across builds (swapdb/hold.json, regenerated here).
   const verdicts = readJson(path.join(DB, 'verdicts.json'), {});
-  const deny = readJson(path.join(DB, 'overrides.json'), {}).deny || {};
-  const pairs = {}, count = { swap: 0, drop: 0, flag: 0, unaudited: 0, denied: 0 };
+  const { deny, accept } = overrides.load();
+  const prevSnap = names.filter(f => f < snapName).pop();
+  const before = new Set(Object.keys(prevSnap ? readJson(path.join(buildsDir, prevSnap)).pairs : snap.pairs).map(MjsKr.bundleStem));
+  const wasHeld = readJson(path.join(DB, 'hold.json'), {});
+  const jpOwn = assetPaths(await manifest('jp', jpHash));
+  const pairs = {}, hold = {}, count = { swap: 0, drop: 0, flag: 0, unaudited: 0, denied: 0, held: 0 };
   for (const [jpName, v] of Object.entries(snap.pairs)) {
-    if (MjsKr.bundleStem(jpName) in deny) { count.denied++; continue; }
-    const verdict = (verdicts[`${jpName} ${v[0]}`] || { verdict: 'unaudited' }).verdict;
-    count[verdict]++;
-    if (verdict !== 'drop') pairs[jpName] = v;
+    const paths = jpOwn.get(jpName) || [];
+    if (overrides.lookup(deny, jpName, paths).length) { count.denied++; continue; }
+    const verdict = verdicts[`${jpName} ${v[0]}`] || { verdict: 'unaudited' };
+    const key = overrides.bundleKey(paths);
+    const english = overrides.openReasons(verdict, overrides.lookup(accept, jpName, paths)).filter(r => r.startsWith('english'));
+    if (english.length && (!before.has(MjsKr.bundleStem(jpName)) || key in wasHeld)) {
+      hold[key] = { jp: jpName, kr: v[0], reasons: english, since: (wasHeld[key] || {}).since || snap.date };
+      count.held++;
+      continue;
+    }
+    count[verdict.verdict]++;
+    if (verdict.verdict !== 'drop') pairs[jpName] = v;
   }
+  fs.writeFileSync(path.join(DB, 'hold.json'), JSON.stringify(hold, null, 1) + '\n');
   fs.writeFileSync(OUT, JSON.stringify({ v: SWAP_FORMAT, min: MIN_SCRIPT, jp: jpHash, kr: krHash, pairs }) + '\n');
   console.log(`wrote public/swap.json: ${Object.keys(pairs).length} pairs`, count);
+  if (count.held) console.log(`  ${count.held} held (swapdb/hold.json); \`node tools/overrides.js accept KEY\` releases one`);
   if (count.unaudited) console.log('  (optional) tools/audit.py drops pairs that change nothing on screen');
 }
 
