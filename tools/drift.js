@@ -1,10 +1,12 @@
-// node tools/drift.js [--out FILE]
+// node tools/drift.js [--out FILE] [--json FILE]
 // Compares the latest swapdb/builds snapshot with the one before and writes a Markdown report:
 // which pairs stayed, changed, appeared, went away or newly failed validation, what the audit
 // flagged among the new ones, and where things moved. Moves are traced through the image archive
 // (tools/imgindex.py): a JP language bundle that vanished and one that appeared holding the same
 // pixels are the same asset under a new path, and a deny entry that no longer matches anything
 // is looked up the same way. Nothing is changed; the report only suggests.
+// --json writes { block, attention }: `block` lists signs that the game was restructured (the
+// canary failed, most pairs or JP language bundles vanished); tools/gate.js won't publish then.
 const fs = require('fs');
 const path = require('path');
 const MjsKr = require('../src/core.js');
@@ -16,6 +18,7 @@ const LANG = /(?<![A-Za-z0-9])jp(?![A-Za-z0-9])/i;
 const LOOK = 6; // dHash bits that may differ for two images to count as the same look
 const readJson = (p, dflt) => fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : dflt;
 const stem = MjsKr.bundleStem;
+const { execFileSync } = require('child_process');
 
 // --- archive access ---
 
@@ -102,7 +105,6 @@ const where = (m, name) => '`' + commonDir(m && m.owner.get(name)) + '`';
 // --- report ---
 
 function main() {
-  const outArg = process.argv.indexOf('--out');
   const names = fs.readdirSync(path.join(DB, 'builds')).filter(f => f.endsWith('.json')).sort();
   if (!names.length) throw new Error('no snapshots in swapdb/builds');
   const cur = readJson(path.join(DB, 'builds', names[names.length - 1]));
@@ -111,7 +113,7 @@ function main() {
   const overrides = readJson(path.join(DB, 'overrides.json'), {});
   const curJp = manifest('jp', cur.jp), prevJp = prev && manifest('jp', prev.jp);
 
-  const lines = [], attention = [];
+  const lines = [], attention = [], block = [];
   const say = (...l) => lines.push(...l);
   say(`# 드리프트 리포트: ${names[names.length - 1].replace(/\.json$/, '')}`, '');
   say(`- jp \`${prev ? prev.jp.slice(0, 8) : '-'}\` → \`${cur.jp.slice(0, 8)}\`, kr \`${prev ? prev.kr.slice(0, 8) : '-'}\` → \`${cur.kr.slice(0, 8)}\``);
@@ -135,7 +137,7 @@ function main() {
   const newRej = !prev ? [] : Object.entries(cur.rejected).filter(([n, v]) => prevRejStems.get(stem(n)) !== v[1]);
   say('', '## 짝', '', `유지 ${kept.length} · 갱신 ${updated.length} · 신규 ${added.length} · 사라짐 ${gone.length} · 새 거부 ${newRej.length} (전체 ${Object.keys(cur.pairs).length}, 거부 ${Object.keys(cur.rejected).length})`);
   if (prev && Object.keys(pp).length && Object.keys(cur.pairs).length < Object.keys(pp).length * 0.5)
-    attention.push(`짝 수가 절반 아래로 줄었음 (${Object.keys(pp).length} → ${Object.keys(cur.pairs).length}): 언어 폴더 규칙이 바뀌었을 수 있다`);
+    block.push(`짝 수가 절반 아래로 줄었음 (${Object.keys(pp).length} → ${Object.keys(cur.pairs).length}): 언어 폴더 규칙이 바뀌었을 수 있다`);
   const list = (title, items, fmt) => { if (items.length) say('', `### ${title}`, '', ...items.slice(0, 60).map(fmt), ...(items.length > 60 ? [`- … 외 ${items.length - 60}`] : [])); };
   if (prev) {
     list('신규', added, n => `- ${where(curJp, n)} \`${stem(n)}\``);
@@ -190,7 +192,7 @@ function main() {
       const from = [...new Set(seen.map(h => h.name))].slice(0, 2).map(n => where(manifestOf(n), n)).join(', ');
       say(`- 새로 생김: ${where(curJp, neu)} (이미지 ${items.length}개${seen.length ? `, 그중 ${seen.length}개는 보관소에 이미 있음: ${from}` : ''})`);
     }
-    if (vanished.length > Math.max(20, before.size * 0.2)) attention.push(`JP 언어 번들 ${vanished.length}개가 사라짐: 경로 개편일 수 있다`);
+    if (vanished.length > Math.max(20, before.size * 0.2)) block.push(`JP 언어 번들 ${vanished.length}개가 사라짐: 경로 개편일 수 있다`);
   }
 
   // Overrides that no longer match, with suggestions traced by image
@@ -221,12 +223,41 @@ function main() {
   if (!orphans) say('모두 이번 빌드에 맞음');
   else attention.push(`맞는 데가 없는 overrides ${orphans}개`);
 
-  lines.splice(headLen, 0, '', attention.length ? `**볼 것 ${attention.length}개**` : '**볼 것 없음**', ...attention.map(a => `- ${a}`));
-  const md = lines.join('\n') + '\n';
-  if (outArg > 0) {
-    fs.mkdirSync(path.dirname(process.argv[outArg + 1]), { recursive: true });
-    fs.writeFileSync(process.argv[outArg + 1], md);
+  // The text patch: canary result and Lua changes since the previous build
+  say('', '## 텍스트 패치 (canary)', '');
+  const canary = readJson(path.join(ARCHIVE, 'canary', cur.jp + '.json'), null);
+  const prevCanary = prev && readJson(path.join(ARCHIVE, 'canary', prev.jp + '.json'), null);
+  if (!canary) {
+    say('canary 결과 없음 (`node tools/canary.js`)');
+    attention.push('canary를 안 돌렸음');
+  } else {
+    say(canary.ok ? '통과' : '**실패**', ...canary.problems.map(p => `- ${p}`));
+    if (!canary.ok) block.push(`canary 실패: ${canary.problems.join('; ')}`);
+    for (const [mod, l] of Object.entries(canary.lua || {})) {
+      const was = prevCanary && prevCanary.lua && prevCanary.lua[mod];
+      if (!was || was.sha === l.sha) continue;
+      attention.push(`${mod}.lua가 바뀜`);
+      const file = sha => path.join(ARCHIVE, 'lua', mod, sha + '.lua');
+      let diff = '(이전 소스 없음)';
+      if (fs.existsSync(file(was.sha))) {
+        try { execFileSync('diff', ['-u', file(was.sha), file(l.sha)]); diff = ''; } catch (e) { diff = e.stdout ? e.stdout.toString() : String(e); }
+      }
+      const cut = diff.split('\n');
+      say('', `### ${mod}.lua \`${was.sha}\` → \`${l.sha}\``, '', '```diff', ...cut.slice(0, 200), ...(cut.length > 200 ? [`… ${cut.length - 200}줄 더`] : []), '```');
+    }
   }
+
+  const summary = [...block.map(b => `**게시 중단** ${b}`), ...attention];
+  lines.splice(headLen, 0, '', summary.length ? `**볼 것 ${summary.length}개**` : '**볼 것 없음**', ...summary.map(a => `- ${a}`));
+  const md = lines.join('\n') + '\n';
+  const write = (flag, text) => {
+    const i = process.argv.indexOf(flag);
+    if (i < 0) return;
+    fs.mkdirSync(path.dirname(process.argv[i + 1]), { recursive: true });
+    fs.writeFileSync(process.argv[i + 1], text);
+  };
+  write('--out', md);
+  write('--json', JSON.stringify({ snapshot: names[names.length - 1], block, attention }, null, 1) + '\n');
   process.stdout.write(md);
 }
 

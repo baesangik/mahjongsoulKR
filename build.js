@@ -26,6 +26,7 @@ const lua = fs.readFileSync(here('src/inject.lua'), 'utf8');
 const out = [
   header,
   `const MJS_KR_LUA = ${JSON.stringify(lua)};`,
+  `const MJS_KR_VERSION = ${JSON.stringify(version)};`,
   fs.readFileSync(here('src/core.js'), 'utf8').replace(/\nif \(typeof module[^\n]*\n?$/, '\n'),
   fs.readFileSync(here('src/main.js'), 'utf8'),
 ].join('\n');

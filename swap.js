@@ -16,6 +16,10 @@ const DB = path.join(__dirname, 'swapdb');
 const AB_CACHE = path.join(__dirname, '.cache/archive/ab'); // mirror of the Oracle archive (tools/worker.sh)
 const readJson = (p, dflt) => fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : dflt;
 const CONCURRENCY = 8;
+// swap.json format. Bump SWAP_FORMAT when entries change shape, and MIN_SCRIPT to the first
+// userscript version that reads the new shape; older scripts (0.2.2+) then skip image swaps.
+const SWAP_FORMAT = 1; // pairs: { jpName: [krName, size, pages?] }
+const MIN_SCRIPT = '0.2.0';
 
 const JP_TOKEN = /(?<![A-Za-z0-9])(jp|JP|Jp)(?![A-Za-z0-9])/g;
 const toKr = p => p.replace(JP_TOKEN, t => ({ jp: 'kr', JP: 'KR', Jp: 'Kr' })[t]);
@@ -194,7 +198,7 @@ async function main() {
     count[verdict]++;
     if (verdict !== 'drop') pairs[jpName] = v;
   }
-  fs.writeFileSync(OUT, JSON.stringify({ jp: jpHash, kr: krHash, pairs }) + '\n');
+  fs.writeFileSync(OUT, JSON.stringify({ v: SWAP_FORMAT, min: MIN_SCRIPT, jp: jpHash, kr: krHash, pairs }) + '\n');
   console.log(`wrote public/swap.json: ${Object.keys(pairs).length} pairs`, count);
   if (count.unaudited) console.log('  (optional) tools/audit.py drops pairs that change nothing on screen');
 }

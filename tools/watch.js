@@ -1,7 +1,8 @@
 // node tools/watch.js [--force]   (runs on the Oracle box every 15 minutes, see tools/oracle/)
 // Polls jp/kr bundle_hash.txt. When either changes, keeps the build's manifests and every language
 // bundle it lists in the archive, logs the build to builds.jsonl and queues a job for the home PC
-// (tools/worker.sh), which does the CPU-heavy part. Bundle names carry content hashes, so archived
+// (tools/worker.sh), which does the CPU-heavy part. The jp build also goes through tools/canary.js
+// here, so a change that breaks the text patch is on record even while the home PC is off. Bundle names carry content hashes, so archived
 // files are never overwritten; each build only adds the bundles that changed.
 //
 // $MJSKR_ARCHIVE (default ~/mjskr-archive):
@@ -10,10 +11,12 @@
 //   manifests/<lang>/<hash>.majset  bundle_info_so.majset of each build
 //   ab/<lang>/<bundle>              language bundles (same layout as the home .cache/archive/ab)
 //   queue/<jp8>_<kr8>.json          builds the home PC hasn't processed yet
+//   canary/<jp hash>.json, lua/     tools/canary.js results and the Lua it read
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const MjsKr = require('../src/core.js');
+const canary = require('./canary.js');
 
 const CDN = 'https://appstatic.mahjongsoul.com/v4';
 const AB = '/resources/ab/WebGL/ASTC/';
@@ -93,13 +96,21 @@ async function main() {
   // the next run catch up if the hash moves again.
   const stats = {};
   for (const l of LANGS) stats[l] = await archiveBuild(l, hashes[l]);
+  let check;
+  try {
+    const c = canary.run(ARCHIVE, hashes.jp, fs.readFileSync(path.join(__dirname, '../src/inject.lua'), 'utf8'));
+    check = { ok: c.ok, problems: c.problems, lua: c.lua };
+  } catch (e) {
+    check = { ok: false, problems: ['canary crashed: ' + e.message] };
+  }
   const at = new Date().toISOString();
-  const entry = { at, ...hashes, prev: { jp: state.jp || null, kr: state.kr || null }, stats };
+  const entry = { at, ...hashes, prev: { jp: state.jp || null, kr: state.kr || null }, stats, canary: check };
   fs.appendFileSync(path.join(ARCHIVE, 'builds.jsonl'), JSON.stringify(entry) + '\n');
   const job = `${hashes.jp.slice(0, 8)}_${hashes.kr.slice(0, 8)}.json`;
   writeOnce(path.join(ARCHIVE, 'queue', job), JSON.stringify(entry, null, 1) + '\n');
   writeOnce(statePath, JSON.stringify({ ...hashes, at }, null, 1) + '\n');
   console.log(`build jp ${hashes.jp.slice(0, 8)} kr ${hashes.kr.slice(0, 8)}:`, JSON.stringify(stats), '-> queue/' + job);
+  if (!check.ok) console.error('canary FAIL:', check.problems.join('; '));
 }
 
 main().catch(e => { console.error(e); process.exit(1); });

@@ -6,6 +6,8 @@ Description=mahjongsoulKR 새 빌드 처리 (오라클 큐)
 [Service]
 Type=oneshot
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# MJSKR_AUTODEPLOY=1 이면 게이트 통과 시 바로 배포 (없으면 알림만)
+EnvironmentFile=-%h/.config/mjskr-worker.env
 ExecStart=%h/Desktop/mahjongsoulKR/tools/worker.sh
 Nice=10
 TimeoutStartSec=1h

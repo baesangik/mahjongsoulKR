@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # 집 PC: 오라클 보관소(tools/watch.js)의 큐에 새 빌드가 있으면 처리한다.
-#   번들·매니페스트 받기 → 짝 검증 → 감사(OCR) → 이미지 색인 → 드리프트 리포트 → 결과를 오라클에 올리기
-# 배포(npm run deploy)와 커밋은 하지 않는다. 리포트를 보고 사람이 한다.
+#   번들·매니페스트 받기 → canary → 짝 검증 → 감사(OCR) → 이미지 색인 → 드리프트 리포트 → 게이트 → 결과를 오라클에 올리기
+# 커밋은 하지 않는다. 배포도 기본으로는 하지 않고, 게이트를 통과하면 "게시 가능"만 알린다.
+# ~/.config/mjskr-worker.env 에 MJSKR_AUTODEPLOY=1 이 있으면 게이트를 통과했을 때 swap.json을 바로 올린다
+# (npx wrangler deploy, public/은 커밋된 그대로). 올린 기록은 오라클 published.jsonl에 남는다.
 # tools/worker.sh [--force]   큐가 비어 있어도 돈다
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -10,7 +12,7 @@ REMOTE=${MJSKR_REMOTE:-mjskr-archive}
 LOCAL=.cache/archive
 SSH=(ssh -o BatchMode=yes -o ConnectTimeout=15 -o IPQoS=none)
 RSYNC=(rsync -a -e "ssh -o BatchMode=yes -o ConnectTimeout=15 -o IPQoS=none")
-mkdir -p "$LOCAL"
+mkdir -p "$LOCAL/lua" "$LOCAL/canary"
 
 exec 9>.cache/worker.lock
 flock -n 9 || exit 0
@@ -28,6 +30,8 @@ trap 'touch "$FAILED"; notify -u critical "mahjongsoulKR 작업 실패" "journal
 
 "${RSYNC[@]}" --ignore-existing --exclude '*.part' "$HOST:$REMOTE/ab" "$HOST:$REMOTE/manifests" "$LOCAL/"
 
+# canary는 실패해도 계속 간다: 리포트에 넣고 게이트가 막는다
+node tools/canary.js || true
 node swap.js
 .venv/bin/python -I tools/audit.py
 node swap.js
@@ -35,12 +39,22 @@ node swap.js
 
 snap=$(ls swapdb/builds | sort | tail -1)
 report="$LOCAL/reports/${snap%.json}.md"
-node tools/drift.js --out "$report" > /dev/null
+node tools/drift.js --out "$report" --json "$LOCAL/reports/${snap%.json}.json" > /dev/null
+gate=0
+gate_out=$(node tools/gate.js --drift "$LOCAL/reports/${snap%.json}.json") || gate=$?
+echo "$gate_out"
+[ "$gate" -le 2 ] || false   # 1 = gate.js 자체 오류
+published=
+if [ "$gate" = 0 ] && [ "${MJSKR_AUTODEPLOY:-0}" = 1 ]; then
+  npx wrangler deploy
+  published=1
+  "${SSH[@]}" "$HOST" "echo '{\"at\":\"$(date -Is)\",\"snapshot\":\"$snap\",\"commit\":\"$(git rev-parse --short HEAD)\"}' >> $REMOTE/published.jsonl"
+fi
 mkdir -p "$LOCAL/swapjson" && cp public/swap.json "$LOCAL/swapjson/${snap%.json}.json"
 
-# 결과 기록을 오라클에 보관한다. 이미지·색인은 내용 해시라 덮어쓰지 않는다.
-"${RSYNC[@]}" --ignore-existing --exclude '*.part' "$LOCAL/img" "$LOCAL/index" "$HOST:$REMOTE/"
-"${RSYNC[@]}" "$LOCAL/reports" "$LOCAL/swapjson" swapdb "$HOST:$REMOTE/"
+# 결과 기록을 오라클에 보관한다. 이미지·색인·Lua는 내용 해시라 덮어쓰지 않는다.
+"${RSYNC[@]}" --ignore-existing --exclude '*.part' "$LOCAL/img" "$LOCAL/index" "$LOCAL/lua" "$HOST:$REMOTE/"
+"${RSYNC[@]}" "$LOCAL/reports" "$LOCAL/swapjson" "$LOCAL/canary" swapdb "$HOST:$REMOTE/"
 if [ -n "$jobs" ]; then
   # 처리하는 동안 새로 들어온 작업은 남긴다
   "${SSH[@]}" "$HOST" "mkdir -p $REMOTE/done && cd $REMOTE/queue && mv $(echo $jobs) ../done/"
@@ -49,5 +63,13 @@ rm -f "$FAILED"
 
 summary=$(sed -n '/^\*\*볼 것/,/^$/p' "$report")
 echo "$summary"
-notify "mahjongsoulKR: 새 빌드 처리함" "$summary
+if [ -n "$published" ]; then
+  notify "mahjongsoulKR: swap.json 올림" "$summary
 $report"
+elif [ "$gate" = 0 ]; then
+  notify "mahjongsoulKR: 게시 가능 (npm run deploy)" "$summary
+$report"
+else
+  notify -u critical "mahjongsoulKR: 게시 안 함" "$gate_out
+$report"
+fi

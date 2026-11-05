@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         mahjongsoulKR
 // @namespace    https://jakhon.chamchi.me
-// @version      0.2.1
+// @version      0.2.2
 // @description  일본 서버 작혼(웹)의 텍스트를 게임에 내장된 한국어로 표시합니다 (비공식)
 // @homepageURL  https://jakhon.chamchi.me
 // @supportURL   https://github.com/baesangik/mahjongsoulKR/issues
@@ -13,6 +13,7 @@
 // ==/UserScript==
 
 const MJS_KR_LUA = "-- [mjs-kr] injected at the end of GameMgr.lua by the userscript.\n-- Shows text in Korean on the JP client: client_language (region/server) stays jp,\n-- only prefer_language (display) becomes kr. Any failure falls back to Japanese.\ndo\n  local TAG = '[mjs-kr] '\n  local function log(m) pcall(print, TAG .. tostring(m)) end\n  local pk = table.unpack or unpack\n  local function pack(...) return { n = select('#', ...), ... } end\n\n  local KR = (ELangStr and ELangStr.Kr) or 'kr'\n  local JP = (ELangStr and ELangStr.Jp) or 'jp'\n  local font_ok = false\n\n  local function set_lang(l)\n    if GameMgr.Inst then GameMgr.Inst.prefer_language = l end\n    if LangMgr then\n      LangMgr.prefer_language = l\n      LangMgr.is_cn_lang = false\n      LangMgr.is_alphabet_lang = (l == KR)\n    end\n  end\n\n  local function apply()\n    if not (font_ok and GameMgr.Inst and LangMgr) then set_lang(JP); return end\n    if GameMgr.Inst.client_language ~= JP then\n      log('client_language=' .. tostring(GameMgr.Inst.client_language) .. ', not touching')\n      return\n    end\n    set_lang(KR)\n  end\n\n  local function wrap(tbl, name, fn)\n    local orig = tbl and tbl[name]\n    if type(orig) ~= 'function' then log('missing ' .. name); return end\n    tbl[name] = function(...) return fn(orig, ...) end\n  end\n\n  -- Load the Korean font group before GameMgr initialises (JP build never loads it).\n  local started = false\n  wrap(GameMgr, 'Init', function(orig, self, ...)\n    if started then return orig(self, ...) end\n    started = true\n    local args = pack(...)\n    local resumed = false\n    local function resume()\n      if resumed then return end\n      resumed = true\n      local ok, f = pcall(function() return LuaTools.LoadFont('kr/kr.ttf') end)\n      font_ok = ok and f ~= nil\n      log(font_ok and 'fonts/kr ready' or ('fonts/kr unavailable: ' .. tostring(f)))\n      return orig(self, pk(args, 1, args.n))\n    end\n    local ok, err = pcall(function() LuaTools.LoadGroup('fonts/kr', resume, nil) end)\n    if not ok then log('LoadGroup failed: ' .. tostring(err)); return resume() end\n  end)\n\n  wrap(LangMgr, 'Init', function(orig, ...)\n    local r = pack(orig(...))\n    local ok, err = pcall(apply)\n    if not ok then pcall(set_lang, JP); log('apply failed: ' .. tostring(err)) end\n    log('prefer_language=' .. tostring(GameMgr.Inst and GameMgr.Inst.prefer_language))\n    return pk(r, 1, r.n)\n  end)\n\n  -- GameMgr:OnInit copies GamePlatformInfo.prefer_language back; reapply before UI setup.\n  wrap(UIMgr, 'Init', function(orig, ...)\n    local ok, err = pcall(apply)\n    if not ok then pcall(set_lang, JP); log('apply failed: ' .. tostring(err)) end\n    return orig(...)\n  end)\n\n  log('hooks installed')\nend\n";
+const MJS_KR_VERSION = "0.2.2";
 // Core of the JP-server Korean patch: UnityFS bundle repacking + Lua injection.
 // Pure functions over Uint8Array so it runs both in the browser and in node.
 
@@ -610,11 +611,13 @@ const MjsKr = (() => {
   const TARGET_SCRIPT = 'GameMgr.lua';
   const MANIFEST_RE = /\/resources\/ab\/.+\/bundle_info_so\.[^/?]+(\?|$)/;
   const SWAP_URL = 'https://jakhon.chamchi.me/swap.json';
+  const SWAP_FORMAT = 1; // the swap.json shape this script reads (swap.js SWAP_FORMAT)
 
   const realFetch = window.fetch.bind(window);
   let target = null; // { name, bytes } once the patched bundle is ready
   const swaps = new Map(); // jp bundle name -> { kr: url, size }
 
+  const newer = (a, b) => { const x = a.split('.').map(Number), y = b.split('.').map(Number); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); return false; };
   const urlOf = input => (typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
   const fileOf = url => new URL(url, location.href).pathname.split('/').pop();
 
@@ -642,7 +645,10 @@ const MjsKr = (() => {
     if (!/\/v4\/jp\//.test(base.pathname)) throw new Error('unexpected manifest path ' + base.pathname);
     const r = await realFetch(SWAP_URL, { cache: 'no-store' });
     if (!r.ok) throw new Error('swap.json ' + r.status);
-    const { pairs } = await r.json();
+    const data = await r.json();
+    if (data.v !== undefined && data.v !== SWAP_FORMAT) throw new Error(`swap.json format ${data.v}, this script reads ${SWAP_FORMAT}: update the userscript`);
+    if (data.min && newer(data.min, MJS_KR_VERSION)) throw new Error(`swap.json wants script ${data.min}+, this is ${MJS_KR_VERSION}: update the userscript`);
+    const { pairs } = data;
     const krBase = new URL(base.href.replace('/v4/jp/', '/v4/kr/'));
     return new Map(Object.entries(pairs).map(([jp, [kr, size, pages]]) => [jp, { kr: new URL(kr, krBase).href, krName: kr, size, pages: pages || [] }]));
   }
@@ -665,7 +671,10 @@ const MjsKr = (() => {
       if (!out) throw new Error('could not update manifest');
       if (lua && out.found.has(lua.name)) target = lua;
       if (swap) for (const [jp, s] of swap) if (out.found.has(jp) && jp !== (lua && lua.name)) swaps.set(jp, s);
-      console.log(TAG, 'ready:', target ? target.name : 'no text patch', '/', swaps.size, 'image bundles to swap');
+      console.log(TAG, 'ready:', target ? target.name : 'no text patch', '/', swap ? `${swaps.size}/${swap.size}` : 0, 'image bundles to swap');
+      // Entries match by content hash, so after a game update only unchanged bundles still match
+      // until swap.json is rebuilt (tools/watch.js picks the update up within ~30 minutes).
+      if (swap && swap.size && swaps.size < swap.size * 0.5) console.warn(TAG, 'swap.json is for another build; most images stay Japanese until it is rebuilt');
       return respond(res, out.bytes);
     } catch (e) {
       console.warn(TAG, 'disabled, game stays Japanese:', e);

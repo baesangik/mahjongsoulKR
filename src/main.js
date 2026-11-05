@@ -7,11 +7,13 @@
   const TARGET_SCRIPT = 'GameMgr.lua';
   const MANIFEST_RE = /\/resources\/ab\/.+\/bundle_info_so\.[^/?]+(\?|$)/;
   const SWAP_URL = 'https://jakhon.chamchi.me/swap.json';
+  const SWAP_FORMAT = 1; // the swap.json shape this script reads (swap.js SWAP_FORMAT)
 
   const realFetch = window.fetch.bind(window);
   let target = null; // { name, bytes } once the patched bundle is ready
   const swaps = new Map(); // jp bundle name -> { kr: url, size }
 
+  const newer = (a, b) => { const x = a.split('.').map(Number), y = b.split('.').map(Number); for (let i = 0; i < 3; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); return false; };
   const urlOf = input => (typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
   const fileOf = url => new URL(url, location.href).pathname.split('/').pop();
 
@@ -39,7 +41,10 @@
     if (!/\/v4\/jp\//.test(base.pathname)) throw new Error('unexpected manifest path ' + base.pathname);
     const r = await realFetch(SWAP_URL, { cache: 'no-store' });
     if (!r.ok) throw new Error('swap.json ' + r.status);
-    const { pairs } = await r.json();
+    const data = await r.json();
+    if (data.v !== undefined && data.v !== SWAP_FORMAT) throw new Error(`swap.json format ${data.v}, this script reads ${SWAP_FORMAT}: update the userscript`);
+    if (data.min && newer(data.min, MJS_KR_VERSION)) throw new Error(`swap.json wants script ${data.min}+, this is ${MJS_KR_VERSION}: update the userscript`);
+    const { pairs } = data;
     const krBase = new URL(base.href.replace('/v4/jp/', '/v4/kr/'));
     return new Map(Object.entries(pairs).map(([jp, [kr, size, pages]]) => [jp, { kr: new URL(kr, krBase).href, krName: kr, size, pages: pages || [] }]));
   }
@@ -62,7 +67,10 @@
       if (!out) throw new Error('could not update manifest');
       if (lua && out.found.has(lua.name)) target = lua;
       if (swap) for (const [jp, s] of swap) if (out.found.has(jp) && jp !== (lua && lua.name)) swaps.set(jp, s);
-      console.log(TAG, 'ready:', target ? target.name : 'no text patch', '/', swaps.size, 'image bundles to swap');
+      console.log(TAG, 'ready:', target ? target.name : 'no text patch', '/', swap ? `${swaps.size}/${swap.size}` : 0, 'image bundles to swap');
+      // Entries match by content hash, so after a game update only unchanged bundles still match
+      // until swap.json is rebuilt (tools/watch.js picks the update up within ~30 minutes).
+      if (swap && swap.size && swaps.size < swap.size * 0.5) console.warn(TAG, 'swap.json is for another build; most images stay Japanese until it is rebuilt');
       return respond(res, out.bytes);
     } catch (e) {
       console.warn(TAG, 'disabled, game stays Japanese:', e);
