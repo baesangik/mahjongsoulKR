@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mahjongsoulKR · 일섭 작혼 한글 텍스트</title>
+<meta name="description" content="일본 서버 작혼(웹)에서 게임에 내장된 한국어 텍스트를 켜주는 비공식 유저스크립트">
+<style>
+  :root {
+    --bg: #f6f5f2; --card: #ffffff; --fg: #1d1c1a; --muted: #6b6862; --line: #e4e1db;
+    --accent: #c2364b; --accent-fg: #fff; --code: #f0eee9; --warn-bg: #fff5e6; --warn-line: #f0c27a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141418; --card: #1d1d23; --fg: #ecebe8; --muted: #9a98a0; --line: #2e2e36;
+      --accent: #e0566b; --accent-fg: #fff; --code: #26262e; --warn-bg: #2a2418; --warn-line: #7a5c2a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.7 -apple-system, BlinkMacSystemFont, "Pretendard", "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 48px 16px 80px; }
+  h1 { font-size: 2rem; line-height: 1.25; margin: 0 0 8px; letter-spacing: -0.02em; }
+  h2 { font-size: 1.25rem; margin: 48px 0 12px; letter-spacing: -0.01em; }
+  h3 { font-size: 1.02rem; margin: 20px 0 6px; }
+  p { margin: 8px 0; }
+  .lead { color: var(--muted); margin-bottom: 28px; }
+  a { color: var(--accent); }
+  code { background: var(--code); padding: 1px 6px; border-radius: 4px; font-size: 0.92em; word-break: break-all; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px; }
+  .install { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; }
+  .btn {
+    display: inline-block; background: var(--accent); color: var(--accent-fg); text-decoration: none;
+    font-weight: 700; padding: 12px 22px; border-radius: 10px; font-size: 1.05rem;
+  }
+  .btn:hover { filter: brightness(1.08); }
+  .meta { color: var(--muted); font-size: 0.92rem; }
+  ol, ul { padding-left: 1.3em; margin: 8px 0; }
+  li { margin: 4px 0; }
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 0; }
+  .tabs button {
+    font: inherit; font-size: 0.95rem; padding: 6px 14px; border-radius: 999px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: var(--fg);
+  }
+  .tabs button[aria-selected="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+  .panel { margin-top: 12px; }
+  .panel[hidden] { display: none; }
+  .warn { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 12px; padding: 16px 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .grid .card h3 { margin-top: 0; }
+  footer { margin-top: 56px; color: var(--muted); font-size: 0.9rem; border-top: 1px solid var(--line); padding-top: 16px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>mahjongsoulKR</h1>
+  <p class="lead">일본 서버 작혼(<code>game.mahjongsoul.com</code>, 웹)의 화면 텍스트를 한국어로 바꿔주는 비공식 유저스크립트입니다.
+    번역을 따로 넣는 게 아니라, 게임에 이미 들어 있는 공식 한국어를 켜는 방식입니다.</p>
+
+  <div class="card install">
+    <a class="btn" href="/mahjongsoulKR.user.js">스크립트 설치</a>
+    <div class="meta">버전 <span id="ver">—</span> · Tampermonkey 또는 Violentmonkey 필요 · 자동 업데이트</div>
+  </div>
+
+  <h2>무엇이 바뀌나요</h2>
+  <div class="grid">
+    <div class="card"><h3>바뀜</h3><ul><li>메뉴·대사·설명 등 텍스트</li><li>한글 폰트</li><li>일부 로고·이미지 (한국어판이 있는 것)</li></ul></div>
+    <div class="card"><h3>그대로</h3><ul><li>계정·로그인·서버 (일본 서버)</li><li>일섭 전용 이미지·음성</li><li>게임 진행·데이터</li></ul></div>
+  </div>
+
+  <h2>설치 방법</h2>
+  <p>1단계에서 브라우저 확장 <b>Tampermonkey</b>를 깔고, 2단계에서 위의 <b>스크립트 설치</b> 버튼을 누르면 됩니다.</p>
+
+  <h3>1. Tampermonkey 설치</h3>
+  <div class="tabs" role="tablist">
+    <button role="tab" aria-selected="true" data-tab="chrome">크롬 · 엣지 · 웨일</button>
+    <button role="tab" aria-selected="false" data-tab="firefox">파이어폭스</button>
+    <button role="tab" aria-selected="false" data-tab="android">안드로이드</button>
+    <button role="tab" aria-selected="false" data-tab="ios">아이폰 · 아이패드</button>
+  </div>
+
+  <div class="panel card" data-panel="chrome">
+    <ol>
+      <li><a href="https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo" target="_blank" rel="noopener">크롬 웹스토어의 Tampermonkey</a>를 설치합니다. 엣지는 <a href="https://microsoftedge.microsoft.com/addons/detail/tampermonkey/iikmkjmpaadaobahmlepeloendndfphd" target="_blank" rel="noopener">엣지 애드온</a>에서 받아도 됩니다.</li>
+      <li><b>유저스크립트 허용을 켜야 합니다.</b> 이걸 안 하면 스크립트가 아예 실행되지 않습니다.
+        <ul>
+          <li>주소창에 <code>chrome://extensions</code>(엣지는 <code>edge://extensions</code>)를 열고 오른쪽 위 <b>개발자 모드</b>를 켭니다.</li>
+          <li>최신 크롬에서는 Tampermonkey의 <b>세부정보</b>에 들어가 <b>사용자 스크립트 허용</b>도 켜야 합니다.</li>
+        </ul>
+      </li>
+    </ol>
+  </div>
+  <div class="panel card" data-panel="firefox" hidden>
+    <ol>
+      <li><a href="https://addons.mozilla.org/ko/firefox/addon/tampermonkey/" target="_blank" rel="noopener">파이어폭스 부가 기능의 Tampermonkey</a>를 설치합니다. <a href="https://addons.mozilla.org/ko/firefox/addon/violentmonkey/" target="_blank" rel="noopener">Violentmonkey</a>도 됩니다.</li>
+      <li>추가 설정은 필요 없습니다.</li>
+    </ol>
+  </div>
+  <div class="panel card" data-panel="android" hidden>
+    <ol>
+      <li>안드로이드용 <b>파이어폭스</b>를 설치합니다.</li>
+      <li>파이어폭스 메뉴 → 부가 기능에서 <b>Tampermonkey</b>를 추가합니다.</li>
+      <li>그다음은 PC와 같습니다.</li>
+    </ol>
+  </div>
+  <div class="panel card" data-panel="ios" hidden>
+    <p>사파리 확장 <b>Userscripts</b>나 <b>Stay</b> 앱으로 설치할 수 있습니다. 아직 테스트하지 않았습니다.</p>
+  </div>
+
+  <h3>2. 스크립트 설치</h3>
+  <ol>
+    <li>이 페이지 위쪽의 <b>스크립트 설치</b> 버튼을 누릅니다.</li>
+    <li>Tampermonkey 설치 화면이 뜨면 <b>설치</b>를 누릅니다. 이미 깔려 있으면 <b>업데이트</b>나 <b>재설치</b>로 나옵니다.</li>
+    <li>설치 화면 대신 코드가 그대로 보이면 Tampermonkey가 없거나 꺼져 있는 것입니다. 1단계를 다시 확인하세요.</li>
+  </ol>
+
+  <h3>3. 확인</h3>
+  <ol>
+    <li><a href="https://game.mahjongsoul.com/" target="_blank" rel="noopener">game.mahjongsoul.com</a>에 접속합니다. 이미 열려 있었다면 새로고침합니다.</li>
+    <li>타이틀 로고가 <b>작혼</b>으로 나오고 버튼과 메뉴가 한국어면 성공입니다.</li>
+  </ol>
+
+  <h2>안 될 때</h2>
+  <ul>
+    <li><b>일본어 그대로:</b> Tampermonkey 아이콘을 눌러 <code>mahjongsoulKR</code>이 켜져 있는지 확인하고 새로고침하세요. 크롬이라면 1단계의 유저스크립트 허용을 다시 확인하세요.</li>
+    <li><b>광고 차단기:</b> 일부 광고 차단기가 유저스크립트를 막습니다. 게임 사이트에서만 꺼보세요.</li>
+    <li><b>게임이 안 켜지거나 멈춤:</b> Tampermonkey에서 스크립트를 끄고 새로고침해 보세요. 원래대로 켜지면 패치 문제이니 <a href="https://github.com/baesangik/mahjongsoulKR/issues" target="_blank" rel="noopener">이슈</a>로 알려주세요. F12 콘솔의 <code>[mjs-kr]</code> 로그를 같이 보내주면 빨리 고칠 수 있습니다.</li>
+    <li>패치가 실패하면 스크립트가 스스로 꺼지고 게임은 일본어로 정상 실행되도록 만들어져 있습니다.</li>
+  </ul>
+
+  <h2>제거</h2>
+  <p>Tampermonkey 대시보드에서 <code>mahjongsoulKR</code>을 삭제하고 새로고침하면 바로 일본어로 돌아옵니다. 게임 데이터나 설정에는 남는 게 없습니다.</p>
+
+  <h2>원리</h2>
+  <p>일섭 클라이언트에도 한국어 텍스트와 폰트가 들어 있지만, 일섭에서는 표시 언어를 일본어로만 고정합니다.
+    이 스크립트는 게임이 받는 Lua 스크립트 번들 하나에 몇 줄을 덧붙여서, 서버 설정(<code>client_language</code>)은 그대로 두고 표시 언어(<code>prefer_language</code>)만 한국어로 바꿉니다.
+    번들 이름이나 암호 키가 바뀌어도 자동으로 찾아내기 때문에, 게임 업데이트 때마다 패치를 고칠 필요가 거의 없습니다.
+    자세한 내용과 소스는 <a href="https://github.com/baesangik/mahjongsoulKR" target="_blank" rel="noopener">GitHub</a>에 있습니다.</p>
+
+  <h2>주의</h2>
+  <div class="warn">
+    <p>공식이 아닌 팬메이드 모드이며, 게임 운영사와 관련이 없습니다. 클라이언트를 수정하는 방식이라 <b>계정 제재 가능성이 0은 아닙니다.</b> 사용에 따른 책임은 사용자 본인에게 있습니다.</p>
+  </div>
+
+  <footer>
+    mahjongsoulKR · <a href="https://github.com/baesangik/mahjongsoulKR" target="_blank" rel="noopener">GitHub</a> · 비공식 팬메이드
+  </footer>
+</main>
+<script>
+  document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => {
+    document.querySelectorAll('.tabs button').forEach(x => x.setAttribute('aria-selected', x === b));
+    document.querySelectorAll('.panel').forEach(p => p.hidden = p.dataset.panel !== b.dataset.tab);
+  }));
+  const ua = navigator.userAgent;
+  const pick = /Android/.test(ua) ? 'android' : /iPhone|iPad/.test(ua) ? 'ios' : /Firefox/.test(ua) ? 'firefox' : null;
+  if (pick) document.querySelector(`.tabs button[data-tab="${pick}"]`).click();
+  fetch('/version.txt', { cache: 'no-store' }).then(r => r.ok ? r.text() : '').then(v => { if (v.trim()) document.getElementById('ver').textContent = v.trim(); }).catch(() => {});
+</script>
+</body>
+</html>
