@@ -26,7 +26,7 @@ import warnings; warnings.filterwarnings('ignore', module='UnityPy')
 
 ROOT = Path(__file__).resolve().parent.parent
 DB = ROOT / 'swapdb'
-CACHE = ROOT / '.cache/ab'
+CACHE = ROOT / '.cache/archive/ab'  # shared with swap.js, mirrored from the Oracle archive
 TESSDATA = ROOT / '.cache/tessdata'
 TESSDATA_URL = 'https://github.com/tesseract-ocr/tessdata_fast/raw/main/'
 METHOD = 'pixel+ocr2'
@@ -46,7 +46,9 @@ def fetch(build, name):
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         data = urllib.request.urlopen(f'{CDN}/{build}{AB}{urllib.parse.quote(name)}', timeout=60).read()
-        path.write_bytes(data)
+        tmp = path.with_name(path.name + '.part')
+        tmp.write_bytes(data)
+        tmp.replace(path)
     return path
 
 

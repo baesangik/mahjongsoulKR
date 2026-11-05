@@ -1,0 +1,16 @@
+# 오라클: 작혼 jp·kr 빌드 감시, 바뀌면 매니페스트·언어 번들 보관하고 큐에 넣기 (tools/watch.js)
+# 설치는 집 PC에서 tools/oracle_install.sh
+[Unit]
+Description=mahjongsoulKR 빌드 감시
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Environment=MJSKR_ARCHIVE=/home/ubuntu/mjskr-archive
+ExecStart=/usr/bin/node /home/ubuntu/mjskr/tools/watch.js
+# diphy가 먼저다
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=30min

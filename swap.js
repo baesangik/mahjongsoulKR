@@ -13,6 +13,7 @@ const CDN = 'https://appstatic.mahjongsoul.com/v4';
 const AB = '/resources/ab/WebGL/ASTC/';
 const OUT = path.join(__dirname, 'public/swap.json');
 const DB = path.join(__dirname, 'swapdb');
+const AB_CACHE = path.join(__dirname, '.cache/archive/ab'); // mirror of the Oracle archive (tools/worker.sh)
 const readJson = (p, dflt) => fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : dflt;
 const CONCURRENCY = 8;
 
@@ -29,6 +30,17 @@ async function get(url, as = 'bytes') {
       if (i >= 2) throw e;
     }
   }
+}
+
+// Bundle names carry content hashes, so a cached copy never goes stale.
+async function bundle(lang, name) {
+  const file = path.join(AB_CACHE, lang, name);
+  if (fs.existsSync(file)) return new Uint8Array(fs.readFileSync(file));
+  const bytes = await get(`${CDN}/${lang}${AB}${name}`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file + '.part', bytes);
+  fs.renameSync(file + '.part', file);
+  return bytes;
 }
 
 // jp bundle name -> kr bundle name, for JP bundles whose language assets all live in one KR bundle
@@ -116,7 +128,7 @@ function assetPaths(m) {
 // The swap.json entry for one pair: [krName, size, pages?, keep?]. `keep` lists sprites to show as
 // JP anyway. Throws when the result can't stand in for the JP bundle.
 async function buildPair(jpName, krName, paths, keep = []) {
-  const [jpBytes, krBytes] = await Promise.all([get(`${CDN}/jp${AB}${jpName}`), get(`${CDN}/kr${AB}${krName}`)]);
+  const [jpBytes, krBytes] = await Promise.all([bundle('jp', jpName), bundle('kr', krName)]);
   const swapped = MjsKr.swapBundle(krBytes, krName, jpName);
   const merged = MjsKr.mergeJpSprites(swapped, jpBytes, keep);
   const out = merged ? merged.bytes : swapped;

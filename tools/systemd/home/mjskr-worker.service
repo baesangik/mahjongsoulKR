@@ -1,0 +1,11 @@
+# 집 PC: 오라클 큐의 새 빌드를 받아 검증·감사·색인·리포트 (tools/worker.sh)
+# 설치: cp tools/systemd/home/mjskr-worker.* ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now mjskr-worker.timer
+[Unit]
+Description=mahjongsoulKR 새 빌드 처리 (오라클 큐)
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/Desktop/mahjongsoulKR/tools/worker.sh
+Nice=10
+TimeoutStartSec=1h

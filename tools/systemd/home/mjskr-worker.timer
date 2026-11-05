@@ -1,0 +1,11 @@
+# 10분마다 mjskr-worker.service (큐가 비어 있으면 ssh 한 번으로 끝난다)
+[Unit]
+Description=mahjongsoulKR 큐 확인 10분마다
+
+[Timer]
+OnBootSec=3min
+OnCalendar=*:0/10
+RandomizedDelaySec=30
+
+[Install]
+WantedBy=timers.target

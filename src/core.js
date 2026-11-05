@@ -590,7 +590,7 @@ const MjsKr = (() => {
     return null;
   }
 
-  return { locate, readManifest, setManifestSizes, patchLuaBundle, extractLua, xor, readBundle, bundleStem, swapBundle, mergeJpSprites, listObjects, readAssetBundle };
+  return { locate, readManifest, setManifestSizes, patchLuaBundle, extractLua, xor, findKey, readBundle, bundleStem, swapBundle, mergeJpSprites, listObjects, readAssetBundle };
 })();
 
 if (typeof module !== 'undefined') module.exports = MjsKr;

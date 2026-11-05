@@ -57,6 +57,19 @@ node swap.js && npm run audit && node swap.js   # 새 빌드: 검증 → 감사 
 ```
 - 한국판이 없는 것(일섭 한정 이벤트·콜라보)과, kr판 구조가 달라 검증에서 떨어진 것(대국 이펙트 프리팹 등)은 일본어로 남는다.
 
+## 자동 감시 (오라클 + 집 PC)
+
+- 오라클(`diphy-oci`)의 `mjskr-watch.timer`가 15분마다 jp·kr `bundle_hash.txt`를 본다. 바뀌면 `tools/watch.js`가 매니페스트와 언어 번들을 `~/mjskr-archive`에 보관하고 `queue/`에 작업을 넣는다.
+- 집 PC의 `mjskr-worker.timer`(사용자 유닛)가 10분마다 큐를 확인한다. 작업이 있으면 `tools/worker.sh`가 번들을 받아 짝 검증 → 감사 → 이미지 색인(`tools/imgindex.py`) → 드리프트 리포트(`tools/drift.js`)를 돌리고 결과를 오라클에 올린 뒤 데스크톱 알림을 띄운다. **배포와 커밋은 하지 않는다.** 리포트를 보고 `npm run deploy`.
+- 보관소(`~/mjskr-archive`, 집 PC에는 `.cache/archive`로 미러):
+  - `builds.jsonl`: 빌드 변경 기록. `manifests/<lang>/<hash>.majset`: 빌드별 매니페스트.
+  - `ab/<lang>/<번들>`: 언어 번들 원본. 이름에 해시가 있어 덮어쓰지 않고 쌓인다.
+  - `img/<sha>.png`: 이미지마다 한 장씩. `index/<lang>/<번들>.json`: 번들의 경로와 이미지별 크기·dHash·sha1.
+  - `reports/`: 빌드별 드리프트 리포트. `swapjson/`: 빌드별로 만든 `swap.json`. `swapdb/`: 원장 사본.
+- 드리프트 리포트는 짝의 유지·갱신·신규·사라짐·새 거부를 나누고, 이미지로 역추적한다. 사라진 JP 번들과 새 번들이 같은 픽셀(또는 같은 dHash)을 가지면 경로 이동으로 보고, 맞는 데가 없어진 `overrides` 항목과 이름이 바뀐 `revert` 스프라이트도 옮겨 간 곳을 제안한다. 고치는 건 사람이 한다.
+- 설치·갱신: `tools/oracle_install.sh`(오라클 코드·유닛), `cp tools/systemd/home/mjskr-worker.* ~/.config/systemd/user/ && systemctl --user enable --now mjskr-worker.timer`.
+- 수동 실행: `tools/worker.sh --force`. 실패하면 한 시간 쉬었다가 다시 한다(`.cache/worker.failed`).
+
 ## 파일
 
 ```
@@ -66,6 +79,10 @@ src/inject.lua    게임 Lua에 덧붙이는 코드
 build.js          src → public/mahjongsoulKR.user.js
 swap.js           jp·kr 매니페스트 → swapdb/builds 스냅샷 → public/swap.json (커밋하지 않음)
 tools/audit.py    짝의 이미지를 디코드해 비교 → swapdb/verdicts.json
+tools/watch.js    (오라클) 빌드 감시·번들 보관·큐
+tools/worker.sh   (집 PC) 큐 처리: 검증·감사·색인·리포트
+tools/imgindex.py 보관한 번들의 이미지 색인·저장
+tools/drift.js    이전 빌드와 비교, 이미지로 이동 역추적
 swapdb/           빌드별 짝 기록, 감사 결과, 수동 결정
 public/           jakhon.chamchi.me에 올라가는 파일 (index.html = 설치 안내)
 wrangler.jsonc    Cloudflare 배포 설정
