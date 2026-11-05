@@ -1,8 +1,9 @@
 // ==UserScript==
 // @name         mahjongsoulKR
 // @namespace    https://jakhon.chamchi.me
-// @version      0.2.3
+// @version      0.2.4
 // @description  일본 서버 작혼(웹)의 텍스트를 게임에 내장된 한국어로 표시합니다 (비공식)
+// @icon         https://jakhon.chamchi.me/icon.png
 // @homepageURL  https://jakhon.chamchi.me
 // @supportURL   https://github.com/baesangik/mahjongsoulKR/issues
 // @updateURL    https://jakhon.chamchi.me/mahjongsoulKR.user.js
@@ -13,7 +14,7 @@
 // ==/UserScript==
 
 const MJS_KR_LUA = "-- [mjs-kr] injected at the end of GameMgr.lua by the userscript.\n-- Shows text in Korean on the JP client: client_language (region/server) stays jp,\n-- only prefer_language (display) becomes kr. Any failure falls back to Japanese.\ndo\n  local TAG = '[mjs-kr] '\n  local function log(m) pcall(print, TAG .. tostring(m)) end\n  local pk = table.unpack or unpack\n  local function pack(...) return { n = select('#', ...), ... } end\n\n  local KR = (ELangStr and ELangStr.Kr) or 'kr'\n  local JP = (ELangStr and ELangStr.Jp) or 'jp'\n  local font_ok = false\n\n  local function set_lang(l)\n    if GameMgr.Inst then GameMgr.Inst.prefer_language = l end\n    if LangMgr then\n      LangMgr.prefer_language = l\n      LangMgr.is_cn_lang = false\n      LangMgr.is_alphabet_lang = (l == KR)\n    end\n  end\n\n  local function apply()\n    if not (font_ok and GameMgr.Inst and LangMgr) then set_lang(JP); return end\n    if GameMgr.Inst.client_language ~= JP then\n      log('client_language=' .. tostring(GameMgr.Inst.client_language) .. ', not touching')\n      return\n    end\n    set_lang(KR)\n  end\n\n  local function wrap(tbl, name, fn)\n    local orig = tbl and tbl[name]\n    if type(orig) ~= 'function' then log('missing ' .. name); return end\n    tbl[name] = function(...) return fn(orig, ...) end\n  end\n\n  -- Load the Korean font group before GameMgr initialises (JP build never loads it).\n  local started = false\n  wrap(GameMgr, 'Init', function(orig, self, ...)\n    if started then return orig(self, ...) end\n    started = true\n    local args = pack(...)\n    local resumed = false\n    local function resume()\n      if resumed then return end\n      resumed = true\n      local ok, f = pcall(function() return LuaTools.LoadFont('kr/kr.ttf') end)\n      font_ok = ok and f ~= nil\n      log(font_ok and 'fonts/kr ready' or ('fonts/kr unavailable: ' .. tostring(f)))\n      return orig(self, pk(args, 1, args.n))\n    end\n    local ok, err = pcall(function() LuaTools.LoadGroup('fonts/kr', resume, nil) end)\n    if not ok then log('LoadGroup failed: ' .. tostring(err)); return resume() end\n  end)\n\n  wrap(LangMgr, 'Init', function(orig, ...)\n    local r = pack(orig(...))\n    local ok, err = pcall(apply)\n    if not ok then pcall(set_lang, JP); log('apply failed: ' .. tostring(err)) end\n    log('prefer_language=' .. tostring(GameMgr.Inst and GameMgr.Inst.prefer_language))\n    return pk(r, 1, r.n)\n  end)\n\n  -- GameMgr:OnInit copies GamePlatformInfo.prefer_language back; reapply before UI setup.\n  wrap(UIMgr, 'Init', function(orig, ...)\n    local ok, err = pcall(apply)\n    if not ok then pcall(set_lang, JP); log('apply failed: ' .. tostring(err)) end\n    return orig(...)\n  end)\n\n  log('hooks installed')\nend\n";
-const MJS_KR_VERSION = "0.2.3";
+const MJS_KR_VERSION = "0.2.4";
 // Core of the JP-server Korean patch: UnityFS bundle repacking + Lua injection.
 // Pure functions over Uint8Array so it runs both in the browser and in node.
 

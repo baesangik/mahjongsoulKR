@@ -12,6 +12,7 @@ const header = `// ==UserScript==
 // @namespace    https://jakhon.chamchi.me
 // @version      ${version}
 // @description  일본 서버 작혼(웹)의 텍스트를 게임에 내장된 한국어로 표시합니다 (비공식)
+// @icon         ${SITE}/icon.png
 // @homepageURL  ${SITE}
 // @supportURL   ${REPO}/issues
 // @updateURL    ${SITE}/mahjongsoulKR.user.js

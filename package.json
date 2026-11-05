@@ -1,6 +1,6 @@
 {
   "name": "mahjongsoulkr",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "description": "일본 서버 작혼(웹) 한국어 텍스트·이미지 유저스크립트",
   "scripts": {
