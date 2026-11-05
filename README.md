@@ -34,7 +34,7 @@
 안전장치는 세 겹이다.
 
 1. 짝 검증(`swap.js`): JP 클라이언트가 찾는 경로·스프라이트·노드 이름이 KR판에 다 있고, KR 전용 번들에 의존하지 않는 짝만 쓴다. 나머지는 일본어로 남는다.
-2. 실행 중(`main.js`): KR 번들 받기 실패, 변환 오류, 크기 불일치가 나면 그 번들만 JP 원본을 준다.
+2. 실행 중(`main.js`): KR 번들 받기 실패, 변환 오류, 크기 불일치가 나면 그 번들만 JP 원본을 준다. 매니페스트의 크기는 이미 스왑본 크기로 고쳐져 있지만 로더는 `fileSize`를 검사하지 않아서 JP 원본도 그대로 읽힌다(2026-11-06 `tools/smoke.js --break`로 확인).
 3. 비상 스위치(`swapdb/overrides.json`의 `deny`): 이상한 번들을 넣고 `swap.json`만 다시 올리면 그 번들은 일본어로 돌아간다. 유저스크립트 업데이트는 필요 없다.
 
 - 언어별 이미지는 `<폴더>/jp/<파일>`에 있고, C# 로더가 `client_language`(일섭은 항상 `jp`)로 폴더를 고른다. 그래서 게임은 계속 `jp` 경로를 요청한다.
@@ -84,7 +84,11 @@ npm run audit && node swap.js                    # (선택) 감사해서 drop �
   - `canary/<jp해시>.json`, `lua/<모듈>/<sha8>.lua`: canary 결과와 풀어 본 Lua. `published.jsonl`: 자동 배포 기록.
 - 드리프트 리포트는 짝의 유지·갱신·신규·사라짐·새 거부를 나누고, 이미지로 역추적한다. 사라진 JP 번들과 새 번들이 같은 픽셀(또는 같은 dHash)을 가지면 경로 이동으로 보고, 맞는 데가 없어진 `deny`·`accept` 항목도 옮겨 간 곳을 제안한다. 보류 목록과 옛 stem 키도 알려 준다. 고치는 건 사람이 한다.
 - 언어 규칙 교차검증(`tools/langcheck.js`): 게임의 `MyAssets/docs/localizedImg_jp.json`은 로더가 언어별로 바꾸는 이미지 목록이다. `fileType` 1인 `a/b/c.png`는 `a/b/jp/c.png`(또는 `a/b/jp/` 아틀라스의 스프라이트)를 뜻한다. 이걸 정답지로 삼아 jp 폴더로 풀리는 비율과, 그중 짝 있는 번들에 든 비율을 잰다. 풀리는 비율이 절반 아래로 떨어지거나(폴더 규칙 변경) 짝 커버리지가 이전 빌드의 70% 아래로 떨어지면 게시를 막는다. 짝 없는 번들은 이유별로 나눈다: KR에 kr판 없음(일섭 전용, 정상), 검증 탈락, KR 쪽 번들 구성이 다름(1:1 짝이 안 되는 것).
-- 설치·갱신: `tools/oracle_install.sh`(오라클 코드·유닛), `cp tools/systemd/home/mjskr-worker.* ~/.config/systemd/user/ && systemctl --user enable --now mjskr-worker.timer`.
+- 스모크 테스트(`tools/smoke.js`, `npm run smoke`): 진짜 `game.mahjongsoul.com`을 Chrome(헤드리스)으로 열고 `public/mahjongsoulKR.user.js`를 문서 시작 시점에 넣는다. `swap.json`은 배포본 대신 `public/swap.json`을 쓴다. 타이틀 화면까지만 보고 로그인은 안 한다. 통과 조건은 훅 설치, `GameMgr.lua` 패치, `prefer_language=kr`, 매니페스트와 `swap.json`이 전부 맞음(`n/n`), 스왑 1개 이상, 스왑 실패 0, 페이지 오류 0이다. 스크린샷과 콘솔 로그가 남는다. 게임 캐시를 살리려고 `.cache/smoke-profile`을 계속 쓴다(처음 ~2분, 그다음 ~40초).
+  - `--break N`: 타이틀이 읽는 번들 N개의 KR 이름을 일부러 망가뜨려 JP 원본 폴백이 깨지지 않는지 본다.
+  - 워커는 게이트를 통과하면 이걸 돌리고, 실패하면 "게시 안 함"으로 바꾼다(`MJSKR_SMOKE=0`이면 건너뜀). 결과는 보관소 `smoke/<스냅샷>/`.
+  - `swap.json`은 `data:` URL로 넣는다. 게임이 서비스 워커 없이는 안 뜨는데, 서비스 워커를 거치는 요청은 Playwright `route`로 못 바꾼다.
+- 설치·갱신: `npm i`(playwright-core, Chrome은 설치된 것을 씀), `tools/oracle_install.sh`(오라클 코드·유닛), `cp tools/systemd/home/mjskr-worker.* ~/.config/systemd/user/ && systemctl --user enable --now mjskr-worker.timer`.
 - 수동 실행: `tools/worker.sh --force`. 실패하면 한 시간 쉬었다가 다시 한다(`.cache/worker.failed`).
 
 ## 파일
@@ -104,6 +108,7 @@ tools/canary.js   텍스트 패치가 기대는 Lua·매니페스트·폰트 확
 tools/gate.js     swap.json을 사람 확인 없이 올려도 되는지
 tools/overrides.js swapdb/overrides.json 읽기·편집(deny·accept, 경로 키)
 tools/langcheck.js localizedImg_jp.json과 짝 규칙 교차검증
+tools/smoke.js    실제 게임 타이틀까지 띄워 보는 스모크 테스트 (Chrome)
 swapdb/           빌드별 짝 기록, 감사 결과, 수동 결정
 public/           jakhon.chamchi.me에 올라가는 파일 (index.html = 설치 안내)
 wrangler.jsonc    Cloudflare 배포 설정

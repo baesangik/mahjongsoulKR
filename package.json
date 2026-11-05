@@ -7,6 +7,10 @@
     "build": "node build.js",
     "swap": "node swap.js",
     "deploy": "node swap.js && node build.js && npx wrangler deploy",
-    "audit": ".venv/bin/python -I tools/audit.py"
+    "audit": ".venv/bin/python -I tools/audit.py",
+    "smoke": "node build.js && node tools/smoke.js"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.56.1"
   }
 }

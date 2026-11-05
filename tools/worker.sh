@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 집 PC: 오라클 보관소(tools/watch.js)의 큐에 새 빌드가 있으면 처리한다.
-#   번들·매니페스트 받기 → canary → 짝 검증 → 감사(OCR) → 이미지 색인 → 드리프트 리포트 → 게이트 → 결과를 오라클에 올리기
+#   번들·매니페스트 받기 → canary → 짝 검증 → 감사(OCR) → 이미지 색인 → 드리프트 리포트 → 게이트 → 스모크 → 결과를 오라클에 올리기
 # 커밋은 하지 않는다. 배포도 기본으로는 하지 않고, 게이트를 통과하면 "게시 가능"만 알린다.
 # ~/.config/mjskr-worker.env 에 MJSKR_AUTODEPLOY=1 이 있으면 게이트를 통과했을 때 swap.json을 바로 올린다
 # (npx wrangler deploy, public/은 커밋된 그대로). 올린 기록은 오라클 published.jsonl에 남는다.
@@ -44,6 +44,14 @@ gate=0
 gate_out=$(node tools/gate.js --drift "$LOCAL/reports/${snap%.json}.json") || gate=$?
 echo "$gate_out"
 [ "$gate" -le 2 ] || false   # 1 = gate.js 자체 오류
+# 게이트를 통과하면 실제 게임을 Chrome으로 띄워 타이틀까지 확인한다 (MJSKR_SMOKE=0이면 건너뜀)
+if [ "$gate" = 0 ] && [ "${MJSKR_SMOKE:-1}" = 1 ]; then
+  smoke=0
+  smoke_out=$(node tools/smoke.js --out "$LOCAL/smoke/${snap%.json}" 2>&1) || smoke=$?
+  echo "$smoke_out"
+  if [ "$smoke" != 0 ]; then gate=2; gate_out="게시 안 함: 스모크 테스트 실패
+$(echo "$smoke_out" | grep -E '^FAIL|Error' | head -5)"; fi
+fi
 published=
 if [ "$gate" = 0 ] && [ "${MJSKR_AUTODEPLOY:-0}" = 1 ]; then
   npx wrangler deploy
@@ -54,7 +62,8 @@ mkdir -p "$LOCAL/swapjson" && cp public/swap.json "$LOCAL/swapjson/${snap%.json}
 
 # 결과 기록을 오라클에 보관한다. 이미지·색인·Lua는 내용 해시라 덮어쓰지 않는다.
 "${RSYNC[@]}" --ignore-existing --exclude '*.part' "$LOCAL/img" "$LOCAL/index" "$LOCAL/lua" "$HOST:$REMOTE/"
-"${RSYNC[@]}" "$LOCAL/reports" "$LOCAL/swapjson" "$LOCAL/canary" swapdb "$HOST:$REMOTE/"
+mkdir -p "$LOCAL/smoke"
+"${RSYNC[@]}" "$LOCAL/reports" "$LOCAL/smoke" "$LOCAL/swapjson" "$LOCAL/canary" swapdb "$HOST:$REMOTE/"
 if [ -n "$jobs" ]; then
   # 처리하는 동안 새로 들어온 작업은 남긴다
   "${SSH[@]}" "$HOST" "mkdir -p $REMOTE/done && cd $REMOTE/queue && mv $(echo $jobs) ../done/"
